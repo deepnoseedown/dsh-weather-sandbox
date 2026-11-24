@@ -19,7 +19,9 @@ const Q = window.__ossParams instanceof URLSearchParams ? window.__ossParams : n
 const PARENT_ORIGIN = Q.get('parentOrigin')
 const SKIN = Q.get('skin') === '1'
 
-let seaState = Q.has('sea') ? Number(Q.get('sea')) : 45
+// 海浪大小默认 28（原来 45）。45 在默认风速下波峰偏大，看着吓人；28 是平缓涌动。
+// 客户端 DEFAULTS.sea 必须与这里一致，否则首帧和之后会不一致。
+let seaState = Q.has('sea') ? Number(Q.get('sea')) : 28
 let daylight = Q.has('t') ? Number(Q.get('t')) : 55
 // autoCycle = 自动昼夜是否开启。这是唯一的状态，其它地方一律从它派生。
 // 启动参数 auto："1" 或缺失 = 开自动；"0" = 手动固定。

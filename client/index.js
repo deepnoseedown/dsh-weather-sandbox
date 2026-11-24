@@ -155,7 +155,11 @@ window.__ModuleLoader__.load({
       // 拉起来就接管，拉回 0 再交还给天气。
       snowCover: 0,
       wetness: 0,
-      sea: 45,
+      // 海浪大小：默认 28（原来 45）。
+      // 45 在风速默认 100% 时 seaValue≈1.17，波峰已经偏大、看着有点吓人。
+      // 28 对应 seaValue≈0.85，是「有涌动但不吓人」的起步。
+      // 滑杆上限保持 100 不动 —— 喜欢大浪的用户自己拉上去就是。
+      sea: 28,
       time: 55,
       autoCycle: true,
       // 时间流逝：滑杆 0..100，统一控制所有自走动画的速度（太阳月亮星空、海浪、云、雨雪）。
@@ -211,14 +215,25 @@ window.__ModuleLoader__.load({
     // 每个滑块一组正弦漂移参数：周期（互质，避免整体同步呼吸）+ 幅度（占 0..100 的比例）。
     // 幅度按滑块语义定：需要大胆变化的（温度、云量）给大；不该乱跳的（光晕半径）给小。
     // 周期从 90 秒到 420 秒不等，肉眼看到的是「缓慢地变」，不是一起一伏。
-    // 【自演化不接管任何滑块】
-    // 一开始这里是空对象：自演化只推进「时间」，让天气系统自己跑，
-    // 不去改用户调好的任何滑杆值。
-    // 中途试过让系统接管温度/湿度/云/光/海浪，结果每个都要单独处理
-    // （哪些该灰、哪些不该灰、灰了之后用户还能不能调），越做越复杂，
-    // 而且违反了「用户随时可以调任何滑块」这个最基本的权利。
-    // 所以退回空对象：自演化 = 让天气自己演化，参数始终归用户。
-    const EVOLVE_TRACKS = Object.freeze({});
+    // 【自演化接管「天气本身」的那几个参数】
+    // 规则：默认由系统推动；用户一旦拖动某个滑杆，那个参数立刻交还给用户（记进 userHeld），
+    // 之后系统不再改它，直到用户关掉自演化再打开（重新从头接管）。
+    //
+    // 接管的：温度（决定雨还是雪）、湿度（决定下不下雨）、
+    //        闪电频率 / 闪电数量（雷雨的疏密）。
+    // 不接管的：云、光、海浪 —— 那些是观感参数，用户往往有自己偏好的值，
+    //          系统每拍去改它只会把调好的画面破坏掉。
+    // （雾模块已经从插件里移除，所以 fogPos 不再参与。）
+    const EVOLVE_TRACKS = Object.freeze({
+      tempPos:        { period: 180, amp: 0.26, phase: 0.00 },
+      humidPos:       { period: 240, amp: 0.30, phase: 0.62 },  // 约反相于温度
+      lightningFreq:  { period: 280, amp: 0.30, phase: 0.20 },
+      lightningCount: { period: 340, amp: 0.35, phase: 1.90 },
+    });
+
+    // 被用户「抢回去」的参数集合。用户拖动滑杆时写入，系统就不再碰它。
+    // 每次打开自演化会清空 —— 重新接管，符合「重新开始演化」的直觉。
+    const userHeld = new Set();
 
     // 运行时状态（不存储）：active 时 base 记录用户打开前的值，t 持续推进。
     const evolveState = { active: false, t: 0, base: Object.create(null) };
@@ -526,11 +541,14 @@ window.__ModuleLoader__.load({
       return lo + (hi - lo) * k;
     }
 
-    // 有效滑杆值：自演化时返回系统算出来的值，否则返回用户设置。
+    // 有效滑杆值：自演化且该参数【没被用户抢回去】时，返回系统算出来的值；
+    // 否则返回用户设置。
     function effectiveSlider(key) {
       const s = readSettings();
       const track = EVOLVE_TRACKS[key];
       if (!evolveState.active || !track) return s[key];
+      // 用户拖动过这个滑杆 → 交还给用户，系统不再改它
+      if (userHeld.has(key)) return s[key];
       // 湿度走脉冲，不走正弦 —— 理由见 HUMID_PULSE 上面那段。
       if (key === "humidPos") return humidPulseAt(evolveState.t);
       const base = evolveState.base[key];
@@ -547,6 +565,9 @@ window.__ModuleLoader__.load({
         evolveState.t = 0;
         evolveState.base = Object.create(null);
         for (const key of Object.keys(EVOLVE_TRACKS)) evolveState.base[key] = s[key];
+        // 重新打开 = 重新接管：清掉「用户抢回去」的记录，
+        // 否则上次手动调过的参数会在下次开启时仍然归用户，和「重新开始演化」的直觉不符。
+        userHeld.clear();
       } else {
         // 关掉时把当前漂移到的值冻结进设置，让用户从「看到的状态」接着调，
         // 而不是突然跳回打开前的旧值。
@@ -4938,6 +4959,16 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       let sliderFrame = 0;
       let pendingSlider = null;
       function commitLive(patch) {
+        // 【用户拖动滑杆 = 抢回控制权】
+        // 自演化正在推动的某个参数，只要用户亲手动了，就把它记进 userHeld，
+        // 之后 effectiveSlider 不再返回系统值，而是老老实实返回用户设置。
+        // 这样「系统演化」和「用户随时能调」两件事可以共存：
+        // 没人碰的时候天气自己走，一动手就完全听用户的。
+        if (evolveState.active) {
+          for (const key of Object.keys(patch)) {
+            if (EVOLVE_TRACKS[key]) userHeld.add(key);
+          }
+        }
         pendingSlider = patch;
         const fresh = normalize({ ...readSettings(), ...patch });
         render(fresh);

@@ -2,9 +2,32 @@
 
 > 一个会自己变天气的小世界。
 
+## 站在这三位肩膀上
+
+这个插件不是从零长出来的。它的海、它的天空、它的角色，来自三个原本各自独立的作品。
+
+**感谢他们把这些放到 MIT 协议下，让后来的人可以接着往下做。**
+
+| 作品 | 作者 | 这里用到了什么 |
+|---|---|---|
+| [**Open Sea Skin**](https://github.com/d-dev0101/open-sea-skin) | [**d-dev0101**](https://github.com/d-dev0101) | 整个海洋与天空的渲染内核 —— 波浪、日光、云层、星野，都是从这里起步的 |
+| [**檐下 / dsh-theme-shelter**](https://github.com/ifer47/dsh-theme-shelter) | [**ifer47**](https://github.com/ifer47) | 沉浸式天气氛围的骨架 —— 雨、雪、雷、面板与模式切换的原始设计 |
+| [**dsh-pet**](https://github.com/PC2005-cloud/dsh-pet) | [**PC2005-cloud**](https://github.com/PC2005-cloud) | 角色立绘与全部动作视频（`assets/pet/`）—— 立绘切成三视图去了白底，25 个动作重压到 256×144 |
+
+三位用的是同一种协议：**MIT**。
+
+> 用、改、再发布，都随你。只留一条——**把作者的名字留下**。
+
+这本书也得守这条规矩，所以：完整许可原文分别记在 [LICENSE](LICENSE)、
+[CREDITS.md](CREDITS.md) 和 `LICENSES/` 目录里，三位的署名一个都没删。
+
+**如果你要拿这个项目去做自己的东西，也请把这几个名字一起带走。**
+
+---
+
 打开它，你会看到一片海。太阳会升起来，云会飘过去，草会跟着风摆——而且这一切都不用你管。
 
-![落日时的海面](docs/screenshot-sunset.png)
+![落日时的海面](docs/screenshot-sunset.webp)
 
 ---
 
@@ -26,7 +49,7 @@
 
 打开面板，最上面是四格按钮。你想怎么看它，点哪个就行。
 
-![控制面板](docs/screenshot-panel.png)
+![控制面板](docs/screenshot-panel.webp)
 
 ### ☁ 纯壁纸模式
 
@@ -48,7 +71,7 @@
 
 **目前开放的是「草地」**——一片真实生长的草原。草地密度、花密度、积雪、积水都能调。草会跟着风一片接一片地伏下去，花也被同一道风吹得歪向同一边。
 
-![雪后的草原](docs/screenshot-snow.png)
+![雪后的草原](docs/screenshot-snow.webp)
 
 > 这一个模块是还在长的地方。
 > 目前只做了草地，**以后会陆续加入更多地形**——森林、雪原、沙漠、岩滩……每一片都该有自己的植被和脾气。

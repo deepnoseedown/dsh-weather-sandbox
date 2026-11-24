@@ -4,7 +4,7 @@ Copyright (c) 2026 deepnoseedown
 
 ---
 
-This plugin is a derivative work that merges two MIT-licensed projects:
+This plugin is a derivative work that merges three MIT-licensed projects:
 
 1. Open Sea Skin — realtime WebGL2 ocean theme
    Copyright (c) d-dev0101
@@ -14,6 +14,13 @@ This plugin is a derivative work that merges two MIT-licensed projects:
 2. 檐下 / dsh-theme-shelter — immersive weather ambience
    Copyright (c) ifer47
    https://github.com/ifer47/dsh-theme-shelter (v0.7.3, MIT)
+
+3. dsh-pet — desktop pet with character artwork and animations
+   Copyright (c) PC2005-cloud
+   https://github.com/PC2005-cloud/dsh-pet (MIT)
+   Used: the character illustration (assets/main-character.png) and
+   25 action clips (assets/webm/), both from this repository.
+   See CREDITS.md.
 
 The MIT license text below applies to the merged work as a whole, and the
 original copyright notices of the upstream projects listed above are retained
