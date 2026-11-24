@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
     // 版本号同时是引擎脚本的缓存键（ocean-engine.js?v=VERSION）。
     // 每次改 static/ocean-engine.js 都必须把这里加一，否则浏览器会拿旧引擎，
     // 表现为「改了代码但页面没变化」——闪电不闪、隐藏模式不生效都是这个原因。
-    const VERSION = "1.88.0";
+    const VERSION = "1.89.0";
     const ASSET_BASE = "/dsh-weather-sandbox/";
     const STORE_KEY = "dsh-weather-sandbox/v1";
 
@@ -211,33 +211,14 @@ window.__ModuleLoader__.load({
     // 每个滑块一组正弦漂移参数：周期（互质，避免整体同步呼吸）+ 幅度（占 0..100 的比例）。
     // 幅度按滑块语义定：需要大胆变化的（温度、云量）给大；不该乱跳的（光晕半径）给小。
     // 周期从 90 秒到 420 秒不等，肉眼看到的是「缓慢地变」，不是一起一伏。
-    const EVOLVE_TRACKS = Object.freeze({
-      // 规则滑杆：决定天气本身
-      tempPos:      { period: 180, amp: 0.26, phase: 0.00 },
-      humidPos:     { period: 240, amp: 0.30, phase: 0.62 },  // 约反相于温度
-      fogPos:       { period: 300, amp: 0.28, phase: 1.00 },
-      // 云
-      cloudAmount:  { period: 210, amp: 0.30, phase: 0.30 },
-      cloudDensity: { period: 260, amp: 0.22, phase: 1.30 },
-      cloudUnite:   { period: 330, amp: 0.25, phase: 2.10 },
-      cloudOpacity: { period: 290, amp: 0.12, phase: 0.85 },
-      cloudWind:    { period: 170, amp: 0.28, phase: 1.75 },
-      // 光
-      sunBright:    { period: 360, amp: 0.18, phase: 0.45 },
-      moonBright:   { period: 400, amp: 0.20, phase: 1.55 },
-      starBright:   { period: 420, amp: 0.18, phase: 2.40 },
-      glow:         { period: 250, amp: 0.22, phase: 0.95 },
-      // 半径区间窄（0..0.018），漂移幅度必须小，否则光晕忽大忽小很刺眼
-      radius:       { period: 310, amp: 0.08, phase: 1.10 },
-      // 闪电：频率和数量都让系统自己定，密度自然起伏
-      lightningFreq:  { period: 280, amp: 0.30, phase: 0.20 },
-      lightningCount: { period: 340, amp: 0.35, phase: 1.90 },
-      // 海与玻璃
-      sea:          { period: 190, amp: 0.22, phase: 0.70 },
-      glass:        { period: 380, amp: 0.10, phase: 2.60 },
-      // 天体位置（手动模式下才生效，自动昼夜时不推）
-      time:         { period: 200, amp: 0.18, phase: 1.40 },
-    });
+    // 【自演化不接管任何滑块】
+    // 一开始这里是空对象：自演化只推进「时间」，让天气系统自己跑，
+    // 不去改用户调好的任何滑杆值。
+    // 中途试过让系统接管温度/湿度/云/光/海浪，结果每个都要单独处理
+    // （哪些该灰、哪些不该灰、灰了之后用户还能不能调），越做越复杂，
+    // 而且违反了「用户随时可以调任何滑块」这个最基本的权利。
+    // 所以退回空对象：自演化 = 让天气自己演化，参数始终归用户。
+    const EVOLVE_TRACKS = Object.freeze({});
 
     // 运行时状态（不存储）：active 时 base 记录用户打开前的值，t 持续推进。
     const evolveState = { active: false, t: 0, base: Object.create(null) };
@@ -893,15 +874,6 @@ body[data-ds-dark-theme] @@PN@@ .oss-section-title { color: #e8b64a; }
 @@PN@@ .oss-note.is-warn { color: #c08a2a; }
 /* 两个模式按钮的旧样式已废弃：它们现在是 .oss-modes4 里的 .oss-mode-btn，
    尺寸/颜色统一由上面那组 .oss-mode-btn 规则管，这里不再重复定义尺寸。 */
-/* 自演化接管时：除时间流速外，所有滑块和开关都变灰不可点，
-   明确告诉用户「现在这些不归你管」。时间流速保留可调 —— 那是观察者的视角。 */
-@@PN@@ .oss-evolving input[type="range"]:not(#oss-time-scale),
-@@PN@@ .oss-evolving input[type="checkbox"],
-@@PN@@ .oss-evolving .oss-seg button,
-@@PN@@ .oss-evolving .oss-flip {
-  opacity: .4; pointer-events: none;
-}
-@@PN@@ .oss-evolving input[type="range"] { opacity: .45; }
 /* 纯金流光：把金色渐变裁进文字，再让它缓慢流动。
    只做「渐变 + 位移」两层，不做粒子闪点——那会让 30px 的按钮过分抢眼。
    成本：8 行 CSS，0 JS，background-clip:text 由浏览器原生完成，几乎不花性能。 */
@@ -5031,7 +5003,8 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           evolveBtn.setAttribute("aria-pressed", evolveState.active ? "true" : "false");
           return;
         }
-        panel.classList.toggle("oss-evolving", next);
+        // 自演化不接管任何滑块，所以这里也不加任何「变灰」的 class ——
+        // 用户随时都能调任何参数。
         // 打开：立刻重绘，让系统算出的值马上生效。
         // 关闭：setEvolve 已经把当前值冻结进设置，这里再重绘一次让面板对齐。
         // 重绘失败不该影响按钮状态，所以各自包一层。
