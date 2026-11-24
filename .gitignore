@@ -1,0 +1,21 @@
+# 依赖与构建产物（插件本身零依赖，这些目录不该进仓库）
+node_modules/
+.pnpm-store/
+
+# 本地备份（改代码前留的 .bak-日期）
+*.bak-*
+*.bak
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# 插件市场的临时日志
+.plugin-manager/
+
+# 日志
+*.log
+npm-debug.log*

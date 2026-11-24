@@ -1,0 +1,68 @@
+{
+    "name":  "dsh-weather-sandbox",
+    "displayName":  "天气演化沙盒",
+    "version":  "1.0.0",
+    "description":  "天气演化沙盒：一片会自己变天气的海。太阳会升落，云会飘会散，风从气压来，草跟着风一片片伏下去。下雨、下雪、积水、融雪，全自动循环。零依赖。",
+    "type":  "module",
+    "main":  "index.js",
+    "exports":  {
+                    ".":  "./index.js",
+                    "./client":  "./client/index.js",
+                    "./cordis.patch.yml":  "./cordis.patch.yml",
+                    "./icon":  "./icon.svg",
+                    "./locale/*.json":  "./locale/*.json",
+                    "./package.json":  "./package.json"
+                },
+    "files":  [
+                  "index.js",
+                  "client/",
+                  "static/",
+                  "cordis.patch.yml",
+                  "locale/*.json",
+                  "docs",
+                  "icon.svg",
+                  "README.md",
+                  "LICENSE"
+              ],
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
+                "client":  {
+                               "platform":  "web",
+                               "immediately":  true,
+                               "inject":  [
+                                              "@deepseek-ai/dsh-client-ui-theme"
+                                          ]
+                           }
+            },
+    "keywords":  [
+                     "deepseek",
+                     "harness",
+                     "dsh",
+                     "dsh-plugin",
+                     "weather",
+                     "simulation",
+                     "ocean",
+                     "rain",
+                     "snow",
+                     "sandbox"
+                 ],
+    "repository":  {
+                       "type":  "git",
+                       "url":  "git+https://github.com/deepnoseedown/dsh-weather-sandbox.git"
+                   },
+    "engines":  {
+                    "dsh":  "\u003e=0.2.0-rc.1"
+                },
+    "peerDependencies":  {
+                             "@deepseek-ai/dsh-client-ui-theme":  "\u003e=0.2.0-rc.1"
+                         },
+    "peerDependenciesMeta":  {
+                                 "@deepseek-ai/dsh-client-ui-theme":  {
+                                                                          "optional":  false
+                                                                      }
+                             },
+    "license":  "MIT",
+    "homepage":  "https://github.com/deepnoseedown/dsh-weather-sandbox#readme"
+}
