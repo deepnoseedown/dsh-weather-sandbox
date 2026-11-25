@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
     // 版本号同时是引擎脚本的缓存键（ocean-engine.js?v=VERSION）。
     // 每次改 static/ocean-engine.js 都必须把这里加一，否则浏览器会拿旧引擎，
     // 表现为「改了代码但页面没变化」——闪电不闪、隐藏模式不生效都是这个原因。
-    const VERSION = "1.147.0";
+    const VERSION = "1.164.0";
     const ASSET_BASE = "/dsh-weather-sandbox/";
     const STORE_KEY = "dsh-weather-sandbox/v1";
 
@@ -2653,6 +2653,14 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           window.__ossPetMove(x, z, duration);
           return true;
         },
+        // 纯读：现在离相机多远（米）。只读，不改任何状态。
+        // 必须用 __ossPetPos（读现状），不能用 __ossPetMove 去“读”——
+        // 后者是下命令，调一次就把正在进行的定时位移取消掉。
+        posZ() {
+          if (typeof window.__ossPetPos !== "function") return NaN;
+          const p = window.__ossPetPos();
+          return p && Number.isFinite(p.z) ? p.z : NaN;
+        },
         // 显隐：停止产帧并清空纹理源，屏幕上一点都不留
         setActive(on) {
           active = on !== false;
@@ -2695,9 +2703,14 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
     //    表里写了 hold 的，播一遍之后接着循环，循环到时间才收。
     // ======================================================================
     function createPetScheduler(pet, win) {
-      const NEAR_Z = 3.0;
-      const FAR_MIN = 30, FAR_MAX = 55;
+      // 对外坐标 z 一律是「离相机的米数」，不是世界 z（引擎那一侧唯一一次换算）。
+      //   NEAR_Z 是「靠近镜头」那一档的下限。原来 3.0 —— 但 2.8~3 米处鱼已经
+      //   大到只剩半个头在画面里，身体全在屏幕外。现在整体后撤 1~2 米。
+      const NEAR_Z = 4.8;
       const CLIP_SEC = 10.04;
+      // 一次位移最多走多远（米）。原来远档能一下跳到 26~41 米，等于瞬移，
+      // 落点太稀。现在每段走路只走一小步，落点密、看得见它在草地上挪。
+      const STEP_MAX = 7;
 
       // ---- 动作表 ----
       // w    组内权重
@@ -2732,6 +2745,10 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       let disposed = false;
       let queueTimer = 0;
       let busy = false;          // 正在跑一段，期间的插队要排队
+      // 睡着的时候不理天气。
+      // 天气反应（reactWeather）会 clearTimeout(queueTimer) 再播自己的动作，
+      // 而睡眠计时正是挂在 queueTimer 上 —— 不挡的话，天一变它就醒，看起来像「只睡几秒」。
+      let sleeping = false;
 
       // 环境事件的冷却
       const lastTrigger = { rain: 0, thunder: 0, clear: 0, cold: 0, hot: 0 };
@@ -2798,14 +2815,21 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         lastClip = clip;
 
         // 走路要配位移（引擎按 10 秒走满）。
-        // 距离分三档：5% 贴脸、25% 走近、70% 待在天边。
+        // 【落点密不密，取决于「下一步离现在有多远」，不是「绝对距离多随机」】
+        // 原来每一段都从整幅画面里重新抽一个目标（远档 26~41 米），
+        // 结果每次都是大跨度瞬移，看起来像跳帧。
+        // 现在：先抽一个目标距离，再把位移量钳到 STEP_MAX 以内 ——
+        // 每段都是小步，落点自然就密了。
         if (group === "walk") {
           const r = Math.random();
-          const tz = r < 0.05 ? 2.8
-                   : r < 0.30 ? rand(NEAR_Z, 9)
-                   : rand(FAR_MIN, FAR_MAX) * 0.6 + 8;
-          const hw = halfWidth(tz);
-          pet.moveTo(rand(-hw, hw), tz, CLIP_SEC);
+          const tz = r < 0.05 ? NEAR_Z
+                   : r < 0.30 ? rand(NEAR_Z, 11)
+                   : rand(14, 30);
+          const dir = Math.random() < 0.5 ? -1 : 1;
+          const near = Number.isFinite(pet.posZ()) ? pet.posZ() : tz;
+          const z = near + Math.max(-STEP_MAX, Math.min(STEP_MAX, tz - near));
+          const hw = halfWidth(z);
+          pet.moveTo(rand(-hw, hw), z, CLIP_SEC);
         }
 
         const hold = HOLD[clip];
@@ -2841,23 +2865,39 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 玩家能看清它真的躺下了 —— 这就是「看着自己的宠物睡觉」。
       function sleepSequence() {
         if (disposed) return;
-        // 1. 走到角落（10 秒内到位，和「睡觉-开始」的时长对齐）
-        pet.moveTo(rand(-3.2, -2.2), rand(5.5, 7.5), CLIP_SEC);
-        pet.play("睡觉-开始", () => {
+        sleeping = true;
+        // 1. 用「漂浮踏步」走过去 —— 不能一边播「睡觉-开始」一边位移。
+        //    睡觉-开始 是躺下的动作，不是走路；同时位移就会看到
+        //    「先原地躺下、再被平移过去」。
+        const tx = rand(4.0, 4.6), tz = rand(6.0, 6.6);
+        pet.moveTo(tx, tz, CLIP_SEC);
+        pet.play("漂浮踏步", () => {
           if (disposed) return;
-          // 2. 循环睡 1~3 分钟
-          pet.play("睡觉-循环", () => {}, { loop: true });
-          clearTimeout(queueTimer);
-          queueTimer = setTimeout(() => {
+          // 2. 到位后才躺下
+          pet.play("睡觉-开始", () => {
             if (disposed) return;
-            // 3. 起来
-            pet.play("睡觉-起来", () => {
+            // 3. 循环睡：时长走【真实时间】，不除以 ts()。
+            //    套用时间流速的话，6 倍速下 60 秒只剩 10 秒 —— 合眼就醒。
+            pet.play("睡觉-循环", () => {}, { loop: true });
+            clearTimeout(queueTimer);
+            const sleepMs = rand(60, 180) * 1000;
+            queueTimer = setTimeout(() => {
               if (disposed) return;
-              // 4. 走回中景再回队列
-              pet.moveTo(rand(-1.5, 1.5), rand(9, 14), CLIP_SEC);
-              next();
-            });
-          }, wait(rand(60, 180)));
+              // 4. 起来
+              // 兜底：起床动作若因任何原因播不完（onended 不触发、视频解码失败），
+              // sleeping 会永久停在 true，从此它再也不理天气。
+              // 所以先挂一个保险丝，正常情况下它会被上面的回调抢在前面清掉。
+              const fuse = setTimeout(() => { sleeping = false; next(); }, 20000);
+              pet.play("睡觉-起来", () => {
+                if (disposed) return;
+                clearTimeout(fuse);
+                sleeping = false;
+                // 5. 走回中景再回队列
+                pet.moveTo(rand(-1.5, 1.5), rand(9, 14), CLIP_SEC);
+                next();
+              });
+            }, sleepMs);
+          });
         });
       }
 
@@ -2898,6 +2938,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
 
       function reactWeather() {
         if (disposed) return;
+        if (sleeping) return;      // 睡着的时候不搭理天气
         const s = sampleWeather();
         if (!s) return;
         const t = now();
@@ -2939,6 +2980,16 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       }
 
       return {
+        // 外部手动让它睡。面板上的「让它睡觉」按钮调这个。
+        // 和定时那一路的区别：这个是玩家点的，正在忙也打断 —— 点了就该有反应。
+        sleepNow() {
+          if (disposed) return false;
+          clearTimeout(queueTimer);
+          clearTimeout(sleepTimer);
+          sleepSequence();
+          scheduleSleep();          // 手动睡过之后重新排下一次自动睡
+          return true;
+        },
         start() {
           if (disposed) return;
           pet.face(facing);
@@ -3924,6 +3975,8 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         '<div class="oss-section"><div class="oss-section-title">主体模块 <span style="opacity:.55;font-weight:400">（试验阶段）</span></div>',
         '<div class="oss-switch"><label for="oss-pet-on">鱼主体</label>',
         '<input type="checkbox" id="oss-pet-on" checked /></div>',
+        '<div class="oss-switch"><label>让它睡觉</label>',
+        '<button type="button" class="oss-save oss-pet-sleep" style="cursor:pointer">睡一觉</button></div>',
         '</div>',
         '<div class="oss-foot"><span class="oss-hint">' + copy.otherTerrain + '</span>',
         '<span class="oss-foot-actions">',
@@ -5815,6 +5868,16 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         petOnBox.addEventListener("change", () => {
           const on = petOnBox.checked;
           try { petEntity.setActive(on); } catch (error) { /* 鱼主体没起来 */ }
+        });
+      }
+
+      // ---- 手动让它睡觉 ----
+      // 调调度器暴露的 sleepNow()，它会打断当前这段、走完整的「开始→循环→起来」三连。
+      // 按钮点一下就够了，不需要状态 —— 睡完它自己回队列。
+      const petSleepBtn = q(".oss-pet-sleep");
+      if (petSleepBtn) {
+        petSleepBtn.addEventListener("click", () => {
+          try { petScheduler.sleepNow(); } catch (error) { /* 调度器没起来 */ }
         });
       }
 

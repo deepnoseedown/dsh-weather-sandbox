@@ -2177,6 +2177,7 @@ function main() {
           dist: Math.hypot(x, z - 17),
         })
       }
+
       return out
     }
 
@@ -2644,6 +2645,14 @@ function main() {
       else                   petal = vec3(0.95, 0.52, 0.30);   //
       vec3 core = vec3(0.98, 0.74, 0.14);
       col = mix(core, petal, smoothstep(0.22, 0.34, r));
+      // sunflower: seed 0.93~0.99 (only the patch added in buildFlowers).
+      // Big dark disk + golden petals. Normal daisies use seed<0.92.
+      float sunflower = step(0.925, vSeed) * step(vSeed, 0.995);
+      if (sunflower > 0.5) {
+        col = mix(vec3(0.16, 0.11, 0.05), vec3(0.98, 0.80, 0.16), smoothstep(0.46, 0.54, r));
+        float seedDots = step(0.0, sin(a * 34.0 + r * 26.0));
+        col *= 1.0 - (1.0 - smoothstep(0.30, 0.48, r)) * 0.18 * seedDots;
+      }
       // Volume, in two cheap terms:
       //   ridge   -> each petal is lighter along its spine, darker in the notches
       //   radial  -> the disc centre is lifted and its rim falls away (a dome)
@@ -2872,6 +2881,32 @@ function main() {
           seed: Math.random(),
         })
       }
+
+      // ---- 向日葵丛：画面左下角那几棵 ----
+      // 不新建 Pass、不建缓冲 —— 就是往花的实例数组末尾追加几棵「放大版花」。
+      // 花的顶点着色器里，花盘半径 = aParams.y、花高 = aParams.z、
+      // 杆宽写死 0.006；所以放大时只要同时把 r 和 height 放大，比例才对。
+      // 颜色用 seed >= 0.92 那一档（葵黄）+ 下面 FS 里单独认的 seed 值画黑心。
+      // 位置：世界 (x=5.0, z=11.0)，投影到屏幕 x≈9%、y≈80% —— 左下角。
+      {
+        const PATCH_X = 5.0, PATCH_Z = 11.0, N = 9
+        for (let i = 0; i < N; i++) {
+          const ang = (i / N) * Math.PI * 2 + Math.random() * 0.5
+          const rad = 0.5 + Math.random() * 1.1
+          const x = PATCH_X + Math.cos(ang) * rad
+          const z = PATCH_Z + Math.sin(ang) * rad
+          out.push({
+            x, y: terrainH(x, z), z,
+            yaw: Math.random() * Math.PI * 2,
+            r: 0.30 + Math.random() * 0.10,            // 花盘半径 30~40cm
+            height: 2.0 + Math.random() * 0.7,         // 花高 2.0~2.7m
+            phase: Math.random() * Math.PI * 2,
+            // 0.93~0.99：落进 FS 里「向日葵」那一档，同时比 0.92 高，避开普通黄花
+            seed: 0.93 + Math.random() * 0.06,
+          })
+        }
+      }
+
       return out
     }
 
