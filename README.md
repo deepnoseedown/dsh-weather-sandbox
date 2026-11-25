@@ -12,7 +12,7 @@
 |---|---|---|
 | [**Open Sea Skin**](https://github.com/d-dev0101/open-sea-skin) | [**d-dev0101**](https://github.com/d-dev0101) | 整个海洋与天空的渲染内核 —— 波浪、日光、云层、星野，都是从这里起步的 |
 | [**檐下 / dsh-theme-shelter**](https://github.com/ifer47/dsh-theme-shelter) | [**ifer47**](https://github.com/ifer47) | 沉浸式天气氛围的骨架 —— 雨、雪、雷、面板与模式切换的原始设计 |
-| [**dsh-pet**](https://github.com/PC2005-cloud/dsh-pet) | [**PC2005-cloud**](https://github.com/PC2005-cloud) | 角色立绘与全部动作视频（`assets/pet/`）—— 立绘切成三视图去了白底，25 个动作重压到 256×144 |
+| [**dsh-pet**](https://github.com/PC2005-cloud/dsh-pet) | [**PC2005-cloud**](https://github.com/PC2005-cloud) | 角色立绘与全部动作视频（`assets/pet/`）—— 立绘切成三视图去了白底，50 个动作重压到 256×144 |
 
 三位用的是同一种协议：**MIT**。
 

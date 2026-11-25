@@ -79,6 +79,29 @@ function main() {
   let flowerPass = null
   // 闪电 Pass：由客户端每帧通过 window.__ossBoltSet 推状态
   let boltPass = null
+  // 大肥鱼 Pass：客户端通过 window.__ossPetTexture 交纹理进来
+  let petPass = null
+  // 大肥鱼每帧的朝向/尺寸/抬起量，由客户端通过 __ossPetSet 推进来。
+  // 缺省值就是「立正站着、面朝左、不抬」，所以引擎不知道客户端也没关系。
+  // x 是当前的横向位置（米），每帧朝 petMoveTarget 逼近。
+  // 【两个自由度：x 左右、z 远近】
+  // 只有 x 的时候，鱼是在「一堵墙上左右滑」—— 它和相机的距离永远不变，
+  // 所以看不出它在空间里。加上 z 之后，靠近会变大、远离会变小，
+  // 这才叫「在空间里移动」。
+  // y 暂不做：贴着海面走最稳，浮沉要处理和海面波浪的关系，下一版再说。
+  // z 是【距离相机的米数】，基准 8.5 —— 和下面 petMoveTarget 同一套语义。
+  // 别把世界坐标 z 塞进来：两者方向相反，混一次就是「冲着我来却走出屏幕」。
+  // flip 初值 -1：和客户端 facing 初值一致，第一帧就朝右，不会出现「先朝左再跳右」。
+  // 出生距离 20 米：占屏约 12%，是画面中景。8.5 米那个距离太靠前，一出场就贴脸。
+  const petParams = { flip: -1, aspect: 0.8, lift: 0, x: 0, z: 20 }
+  // 目标位置（相对 PET_POS 的偏移）。插值在 frame() 里做，CLI 只下命令。
+  const petMoveTarget = { x: 0, z: 20 }
+  // 位移时长（秒）。0 = 不限时（按基础速度走）。
+  // 【为什么需要它】素材全是 10 秒的动作展示，本身不带位移 ——
+  // 跑是原地跑。要让「跑的动作」和「真的在移动」对上，只能反过来：
+  // 客户端说「这个动作有 10 秒」，引擎就在 10 秒内走完这段距离。
+  // 否则会出现「跑了 1 秒就到地方、剩下 9 秒原地跑」这种错位。
+  let petMoveDur = 0
   const CAM_POS     = [0, 5.5, 17]
   const CAM_TARGET  = [0, 1.5, 0]
   const FOV_DEG     = 55
@@ -3235,7 +3258,9 @@ function main() {
   const RT_IF = HDR_TEX ? gl.RGBA16F : gl.RGBA8
   const RT_TYPE = HDR_TEX ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE
 
-  function makeRT(w, h) {
+  // withDepth：只有场景 RT 需要深度缓冲（草和地面/角色要互相遮挡）。
+  // bloom 那几张是纯颜色处理，挂深度只是白占显存。
+  function makeRT(w, h, withDepth) {
     const tex = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, tex)
     gl.texImage2D(gl.TEXTURE_2D, 0, RT_IF, w, h, 0, gl.RGBA, RT_TYPE, null)
@@ -3243,11 +3268,21 @@ function main() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    // 深度附件。
+    // 没有它，画进这个 framebuffer 的所有 Pass 的深度测试都是空转 ——
+    // 表现就是「谁最后画谁在最上面」，不可能出现前后遮挡。
+    // 只在场景那个 RT 上开：bloom 用的那几张不需要深度，多挂一个只是白占内存。
+    const depth = withDepth ? gl.createRenderbuffer() : null
+    if (depth) {
+      gl.bindRenderbuffer(gl.RENDERBUFFER, depth)
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h)
+    }
     const fb = gl.createFramebuffer()
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb)
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0)
+    if (depth) gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-    return { tex, fb, w, h }
+    return { tex, fb, w, h, depth }
   }
 
   function resizeRT(rt, w, h) {
@@ -3255,6 +3290,12 @@ function main() {
     rt.w = w; rt.h = h
     gl.bindTexture(gl.TEXTURE_2D, rt.tex)
     gl.texImage2D(gl.TEXTURE_2D, 0, RT_IF, w, h, 0, gl.RGBA, RT_TYPE, null)
+    // 深度附件是 renderbuffer，必须跟着尺寸一起重建，否则深度和颜色对不上。
+    if (rt.depth) {
+      gl.bindRenderbuffer(gl.RENDERBUFFER, rt.depth)
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h)
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null)
+    }
   }
 
   let rtScene, rtBright, rtBlurA, rtBlurB, W = 1, H = 1
@@ -3262,7 +3303,7 @@ function main() {
   function allocRT() {
     const bw = Math.max(1, W >> 1), bh = Math.max(1, H >> 1)
     if (!rtScene) {
-      rtScene  = makeRT(W, H)
+      rtScene  = makeRT(W, H, true)
       rtBright = makeRT(bw, bh)
       rtBlurA  = makeRT(bw, bh)
       rtBlurB  = makeRT(bw, bh)
@@ -3311,6 +3352,316 @@ function main() {
   } catch (error) {
     console.error(LIGHTNING_LOG, '[init] bolt pass failed, lightning disabled', error)
     boltPass = { draw() {}, ready: false, dispose() {} }
+  }
+
+  // 大肥鱼：同样隔离。着色器挂了只是它不出现，海和天照常。
+  try {
+    petPass = createPetPass()
+    if (!petPass.init()) {
+      console.error(PET_PASS_LOG, 'init returned false, pet hidden')
+      petPass = null
+    }
+  } catch (error) {
+    console.error(PET_PASS_LOG, 'pet pass failed, pet hidden', error)
+    petPass = null
+  }
+
+  // ======================================================================
+  //  大肥鱼 Pass —— 真正画进场景里
+  //
+  //  为什么必须进引擎：DOM 上的 <img> 永远是一张贴纸。它不跟相机走、不跟
+  //  地平线走、也不会被海水遮住。它「在场」但不在「空间」里。
+  //  这个 Pass 让它成为一个站在世界坐标里的东西：
+  //    · 用固定的世界位置（不跟相机，相机固定，所以位置稳定）
+  //    · 用 cam.viewProj 投影到屏幕 —— 换分辨率、改 FOV 都自动正确
+  //    · 画在 drawComposite 之后（与 boltPass 同一个位置），所以它不在
+  //      ACES 色调映射里被压暗，颜色和立绘一致
+  //
+  //  纹理来源：客户端把抠好黑底的 canvas 交进来（__ossPetTexture）。
+  //  那一步抠图逻辑在 client 里，和 PET-INTEGRATION.md 一致；
+  //  这里只负责把它贴到一个朝向相机、固定世界位置的四边形上。
+  //
+  //  失败隔离：和 sunPass / boltPass 同一套规矩 —— init 失败就返回空实现，
+  //  主链路（海、天、云、天气）一概不受影响。
+  // ======================================================================
+  const PET_PASS_LOG = '[dsh-weather-sandbox:pet]'
+
+  function petHash2(px, pz) {
+    const qx = px - Math.floor(px / 289) * 289
+    const qz = pz - Math.floor(pz / 289) * 289
+    const ax = Math.sin(qx * 127.1 + qz * 311.7) * 43758.5453
+    const az = Math.sin(qx * 269.5 + qz * 183.3) * 43758.5453
+    return [(ax - Math.floor(ax)) * 2 - 1, (az - Math.floor(az)) * 2 - 1]
+  }
+  function petGnoise(px, pz) {
+    const ix = Math.floor(px), iz = Math.floor(pz)
+    const fx = px - ix, fz = pz - iz
+    const ux = fx * fx * fx * (fx * (fx * 6 - 15) + 10)
+    const uz = fz * fz * fz * (fz * (fz * 6 - 15) + 10)
+    const h00 = petHash2(ix, iz), h10 = petHash2(ix + 1, iz)
+    const h01 = petHash2(ix, iz + 1), h11 = petHash2(ix + 1, iz + 1)
+    const n00 = h00[0] * fx + h00[1] * fz
+    const n10 = h10[0] * (fx - 1) + h10[1] * fz
+    const n01 = h01[0] * fx + h01[1] * (fz - 1)
+    const n11 = h11[0] * (fx - 1) + h11[1] * (fz - 1)
+    const a = n00 + (n10 - n00) * ux
+    const b = n01 + (n11 - n01) * ux
+    return a + (b - a) * uz
+  }
+  function petTerrainFbm(px, pz) {
+    return petGnoise(px, pz) + petGnoise(px * 2.13 + 31.7, pz * 2.13 + 12.9) * 0.5
+  }
+  function petTerrainHeight(x, z) {
+    const h = petTerrainFbm(x * 0.010, z * 0.010) * 6.0
+            + petTerrainFbm(x * 0.045 + 7.3, z * 0.045 + 19.1) * 1.20
+            + petGnoise(x * 0.140 + 3.7, z * 0.140 + 11.3) * 0.42
+    return h * 0.55 + 2.20
+  }
+
+  function createPetPass() {
+    // 角色的基准位置（世界坐标，米）。
+    //   相机 [0,5.5,17] 看向 [0,1.5,0]，FOV 55°。
+    //   x=0 是画面正中；y=0.05 是脚底刚出水面；z=8.5 对应离相机 8.5 米。
+    //   2.5 米高在这个距离上约占屏高 27%，是能看清表情的下限。
+    const PET_POS = [0, 0.05, 8.5]
+    const PET_HEIGHT = 2.5
+    // 【对外的 z 一律是「距离相机的米数」，不是世界 z】
+    //   镜头看的方向是 -z，所以「离相机越远」= 世界 z 越小，两者方向相反。
+    //   只在这一处换算：worldZ = PET_POS[2] - (dist - CAM_TO_PET)。别处不许再翻。
+    const CAM_TO_PET = 8.5
+
+    const VS = `#version 300 es
+    in vec2 aCorner;
+    uniform mat4 uViewProj;
+    uniform vec3 uOrigin;
+    uniform vec2 uSize;
+    uniform float uFlip;
+    out vec2 vUV;
+    void main() {
+      // aCorner: x in [-0.5, 0.5] (width), y in [0, 1] (bottom -> top)
+      // 翻转只发生在 UV 上：几何位置不动，只把贴图水平镜像。
+      // 如果顶点位置也乘 uFlip，等于翻两次回到原样，朝向永远改不过来。
+      vec3 world = uOrigin + vec3(aCorner.x * uSize.x, aCorner.y * uSize.y, 0.0);
+      gl_Position = uViewProj * vec4(world, 1.0);
+      float u = uFlip < 0.0 ? (1.0 - (aCorner.x + 0.5)) : (aCorner.x + 0.5);
+      vUV = vec2(u, 1.0 - aCorner.y);
+    }`
+
+    const FS = `#version 300 es
+    precision highp float;
+    in vec2 vUV;
+    uniform sampler2D uTex;
+    uniform float uHasTex;
+    uniform float uExposure;
+    // 贴玻璃虚化 0..1。凑到 2.8 米时它占屏 75%，不失焦就像被放大，不像凑近。
+    uniform float uBlur;
+    uniform vec2 uTexel;
+    // 场景光：太阳色 × 强度、月光色 × 强度、云量、昼夜进度。
+    // 角色是贴图，没有法线，所以不做方向光 —— 只做整体调色：
+    // 白天偏暖白、黄昏偏橙、夜里靠月光偏冷蓝、雷雨天压暗。
+    // 这样它至少和天空是同一个时刻，而不是一张永远不变的贴纸。
+    uniform vec3 uSunColor;
+    uniform vec3 uMoonColor;
+    uniform float uCloudMask;
+    uniform float uDaylight;
+    out vec4 frag;
+    // 必须和 FS_COMP 的 aces() 同系数：否则角色比周围暗一半（0.2 → 0.30 那一段）。
+    vec3 aces(vec3 x) {
+      const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+      return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+    }
+    void main() {
+      // 没有纹理就不画任何像素。关掉主体时屏幕上不该留痕迹。
+      if (uHasTex < 0.5) discard;
+      // 五点近似高斯。只在 uBlur > 0.01 时多采，平时一次采样，零额外成本。
+      vec4 t;
+      if (uBlur > 0.01) {
+        vec2 o = uTexel * uBlur * 3.0;
+        t  = texture(uTex, vUV) * 0.40;
+        t += texture(uTex, vUV + vec2( o.x,  0.0)) * 0.15;
+        t += texture(uTex, vUV + vec2(-o.x,  0.0)) * 0.15;
+        t += texture(uTex, vUV + vec2( 0.0,  o.y)) * 0.15;
+        t += texture(uTex, vUV + vec2( 0.0, -o.y)) * 0.15;
+      } else {
+        t = texture(uTex, vUV);
+      }
+      if (t.a < 0.004) discard;
+      // 立绘是 sRGB 显示值 → 先转线性 → 和场景一样过 ACES → 输出
+      vec3 lin = pow(t.rgb, vec3(2.2));
+      // ---- 场景光调色 ----
+      // 三个因子相乘，全部 0..1 附近，不会把角色压成黑的：
+      //   太阳项：日光越强越亮，色温跟着 sunColor（黄昏偏橙）
+      //   月亮项：入夜后接管，偏冷蓝
+      //   云量  ：云厚时压暗一点，和天空的阴暗一致
+      float day = clamp(uDaylight / 100.0, 0.0, 1.0);
+      vec3 sunLit = uSunColor * (0.55 + 0.45 * day);
+      vec3 moonLit = uMoonColor * (1.0 - day);
+      vec3 lit = sunLit + moonLit;
+      // 归一化：不让总亮度随色温乱跳，只让它「有颜色」
+      float lum = max(dot(lit, vec3(0.2126, 0.7152, 0.0722)), 0.12);
+      vec3 tint = lit / lum * 0.92;
+      tint *= 1.0 - clamp(uCloudMask, 0.0, 1.0) * 0.35;
+      frag = vec4(aces(lin * tint * uExposure), t.a);
+    }`
+
+    let prog = null, vao = null, vbo = null
+    let U = {}
+    let tex = null
+    let textureSource = null
+    let ready = false
+    let flip = 1
+
+    function compile(type, src) {
+      const sh = gl.createShader(type)
+      gl.shaderSource(sh, src)
+      gl.compileShader(sh)
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        console.error(PET_PASS_LOG, 'shader failed:', gl.getShaderInfoLog(sh))
+        gl.deleteShader(sh)
+        return null
+      }
+      return sh
+    }
+
+    function init() {
+      const vs = compile(gl.VERTEX_SHADER, VS)
+      const fs = compile(gl.FRAGMENT_SHADER, FS)
+      if (!vs || !fs) return false
+      prog = gl.createProgram()
+      gl.attachShader(prog, vs)
+      gl.attachShader(prog, fs)
+      gl.bindAttribLocation(prog, 0, 'aCorner')
+      gl.linkProgram(prog)
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error(PET_PASS_LOG, 'link failed:', gl.getProgramInfoLog(prog))
+        prog = null
+        return false
+      }
+      U = {
+        viewProj: gl.getUniformLocation(prog, 'uViewProj'),
+        origin: gl.getUniformLocation(prog, 'uOrigin'),
+        size: gl.getUniformLocation(prog, 'uSize'),
+        flip: gl.getUniformLocation(prog, 'uFlip'),
+        tex: gl.getUniformLocation(prog, 'uTex'),
+        hasTex: gl.getUniformLocation(prog, 'uHasTex'),
+        exposure: gl.getUniformLocation(prog, 'uExposure'),
+        blur: gl.getUniformLocation(prog, 'uBlur'),
+        texel: gl.getUniformLocation(prog, 'uTexel'),
+        sunColor: gl.getUniformLocation(prog, 'uSunColor'),
+        moonColor: gl.getUniformLocation(prog, 'uMoonColor'),
+        cloudMask: gl.getUniformLocation(prog, 'uCloudMask'),
+        daylight: gl.getUniformLocation(prog, 'uDaylight'),
+      }
+
+      // 两个三角形：x 在 -0.5..0.5，y 在 0..1
+      const quad = new Float32Array([
+        -0.5, 0, 0.5, 0, -0.5, 1,
+        -0.5, 1, 0.5, 0, 0.5, 1,
+      ])
+      vao = gl.createVertexArray()
+      gl.bindVertexArray(vao)
+      vbo = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
+      gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW)
+      gl.enableVertexAttribArray(0)
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
+      gl.bindVertexArray(null)
+
+      tex = gl.createTexture()
+      gl.bindTexture(gl.TEXTURE_2D, tex)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+      gl.bindTexture(gl.TEXTURE_2D, null)
+
+      ready = true
+      return true
+    }
+
+    // 上传一帧纹理。source 可以是 canvas / video / image。
+    function upload(source, w, h) {
+      if (!ready || !tex || !source) return
+      gl.bindTexture(gl.TEXTURE_2D, tex)
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source)
+      gl.bindTexture(gl.TEXTURE_2D, null)
+      textureSource = source
+    }
+
+    // 清空纹理源。此后 draw 走「没有纹理」分支，什么都不画。
+    function clear() {
+      textureSource = null
+    }
+
+    // env 是 updateSun() 那一份，和天空/海面同一个时刻的光。
+    function draw(cam, params, env) {
+      if (!ready || !prog) return
+      // 世界坐标 → 投影
+      gl.useProgram(prog)
+      gl.bindVertexArray(vao)
+      gl.enable(gl.BLEND)
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+
+      gl.uniformMatrix4fv(U.viewProj, false, cam.viewProj)
+      const wx = PET_POS[0] + (params && params.x ? params.x : 0)
+      const wz = PET_POS[2] - ((params && params.z ? params.z : 0) - CAM_TO_PET)
+      const groundY = petTerrainHeight(wx, wz)
+      gl.uniform3f(
+        U.origin,
+        wx,
+        groundY + PET_POS[1] + (params && params.lift || 0),
+        wz,
+      )
+      gl.uniform2f(U.size, PET_HEIGHT * (params && params.aspect || 0.8), PET_HEIGHT)
+      gl.uniform1f(U.flip, params && params.flip < 0 ? -1 : 1)
+      gl.uniform1f(U.hasTex, textureSource ? 1 : 0)
+      // 和主合成 pass 用同一个曝光值，角色才会和场景一样亮
+      if (U.exposure) gl.uniform1f(U.exposure, EXPOSURE)
+
+      // 4 米外是正常角色，只有真的凑到眼前才失焦 —— 虚化本身是一个信号。
+      const pz = params && params.z ? params.z : CAM_TO_PET
+      const blur = pz < 4.0 ? Math.min(1, (4.0 - pz) / 1.2) * 0.55 : 0
+      if (U.blur) gl.uniform1f(U.blur, blur)
+      if (U.texel) gl.uniform2f(U.texel, 1 / 256, 1 / 144)
+
+      // 场景光：和天空、海面同一帧的同一份值，角色才会和世界同一个时刻。
+      if (env) {
+        if (U.sunColor) gl.uniform3fv(U.sunColor, env.sunColor)
+        if (U.moonColor) gl.uniform3fv(U.moonColor, env.moonColor)
+        // 云量和昼夜由 frame() 打包进 env 一起传 —— 不在这里直接读 CLOUD/daylight。
+        // 那两个变量定义在本文件更靠后的位置（CLOUD 在 4084 行），
+        // 存在 TDZ 风险：现在因为调用顺序是对的所以不炸，但顺序一变就炸。
+        // 从参数拿，作用域就干净了。
+        if (U.cloudMask) gl.uniform1f(U.cloudMask, env.cloudMask || 0)
+        if (U.daylight) gl.uniform1f(U.daylight, env.daylight || 0)
+      }
+
+      if (textureSource) {
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, tex)
+        gl.uniform1i(U.tex, 0)
+      }
+
+      gl.drawArrays(gl.TRIANGLES, 0, 6)
+      gl.bindVertexArray(null)
+      gl.disable(gl.BLEND)
+    }
+
+    function dispose() {
+      try {
+        if (tex) gl.deleteTexture(tex)
+        if (vbo) gl.deleteBuffer(vbo)
+        if (vao) gl.deleteVertexArray(vao)
+        if (prog) gl.deleteProgram(prog)
+      } catch (error) { /* 上下文已失效 */ }
+      tex = null; vbo = null; vao = null; prog = null
+      textureSource = null
+      ready = false
+    }
+
+    return { init, draw, dispose, upload, clear, get ready() { return ready } }
   }
 
   // 改动 1：矩阵工具内联，删 sub/dot/cross/norm
@@ -3653,6 +4004,22 @@ function main() {
     gl.disable(gl.CULL_FACE)
     }
 
+    if (petPass && petPass.ready) {
+      try {
+        gl.enable(gl.DEPTH_TEST)
+        gl.depthFunc(gl.LEQUAL)
+        gl.depthMask(true)
+        gl.disable(gl.CULL_FACE)
+        petPass.draw(cam, petParams, {
+          sunColor: env.sunColor,
+          moonColor: env.moonColor,
+          cloudMask: CLOUD.mask,
+          daylight,
+        })
+        gl.disable(gl.DEPTH_TEST)
+      } catch (error) { /* 这一帧画不出来，草照常 */ }
+    }
+
     // ---- 草地：地面底色 + 实例草 ----
     // 排在最后，因为它们要盖在海面之上（草比海面远离/接近相机都可能，靠深度测试决定）。
     // 画完自己还原 GL 状态；grassPass 内部 initOk 会挡住整个 Pass。
@@ -3800,10 +4167,17 @@ function main() {
     // 太阳就会跟着云量一拍一跳 —— 这就是「太阳在闪」的真实来源。
     sunMask: 1,
     // 凝聚时长自动：不对外暴露。
-    growRate: 90,
-    stableTime: 150,   // 稳定时长固定（生态法则，不做滑杆）
-    fadeRate: 300,     // 消散时长固定（生态法则，不做滑杆）
-    emptyHold: 10,     // 空停 10 秒
+    // 云的寿命。这四个值是「云是活的」和「云是一块布景」的唯一分界。
+    //   原值 90 / 150 / 300 / 10 秒 = 一个循环将近 9 分钟。
+    //   看三分钟只见它一直趴在天上，和装饰没区别。
+    //   现在压到 3 / 8 / 12 / 6 秒 = 29 秒一轮，一个「临时存在」该有的节奏：
+    //   长出来、停一会儿、散掉、空一阵，再重来。
+    //   注意 cloudStep(dt) 收到的是【未缩放】的 dt（frame() 里 elapsed 才乘 timeScale），
+    //   所以时间流速滑杆管不到云 —— 这是有意保留的：云是世界的呼吸，不是可快进的动画。
+    growRate: 3,
+    stableTime: 8,     // 稳定时长固定（生态法则，不做滑杆）
+    fadeRate: 12,      // 消散时长固定（生态法则，不做滑杆）
+    emptyHold: 6,      // 空停 6 秒：留白，让玩家意识到「刚才那团没了」
     noiseAmp: 0.02,    // 内部扰动
     amount: 150,       // 云量 0..150（面板滑杆），默认拉满；雷暴态可到 300
     level: -1,         // 面板给的目标云量（0..1）；-1 = 还没初始化，首帧直接跳到目标值
@@ -3845,8 +4219,11 @@ function main() {
   // 这样四个阶段彼此成比例，循环读起来像一个整体，而不是四个各拧各的旋钮。
   //   fade 600s → gather ≈ 200s；fade 10s → gather ≈ 20s
   function autoGather() {
-    const f = Math.max(10, CLOUD.fadeRate)
-    return Math.max(18, Math.min(240, f * 0.33))
+    // 凝聚时长跟着消散走（1/3），但下限收到 4 秒：
+    //   cloudBase 这一版把消散压到 12 秒，原来的 18 秒下限会让「凝聚」比「消散」还慢，
+    //   云刚长满就被吹散，看起来像坏掉而不是活着。
+    const f = Math.max(6, CLOUD.fadeRate)
+    return Math.max(4, Math.min(240, f * 0.33))
   }
 
   // 凝聚度对云量的加成：0 → 0.85，1 → 1.15。
@@ -3941,7 +4318,13 @@ function main() {
     elapsed += dt * timeScale
 
     // ---- 云循环引擎：状态机每帧推进一次，结果写进 uCloudMask ----
-    cloudStep(dt)
+    // 【云也吃时间流速】
+    // 原来这里传的是未缩放的 dt，理由是「云是世界的呼吸，不是可快进的动画」。
+    // 但那条理由只在「玩家只调天气」时成立 —— 一旦有了主体和调度器，
+    // 时间流速就是整个世界的时间轴，云不跟就是脱节。
+    // 钳上限 8：timeScale 最大 10，云的状态机在 dt 太大时会跳帧，
+    // 8 倍足够看出「快进」，又不至于让长-散循环一路瞬移过去。
+    cloudStep(Math.min(dt * timeScale, dt * 8))
     stepWind(dt)
 
     // 自动昼夜：一个 0..1 的相位，逐帧累加，走过 1 就回绕。
@@ -4014,6 +4397,40 @@ function main() {
     // 叠进 rtScene 会被后面的 aces() 压成一条看不见的线（这就是「开关能点、从不闪」）。
     if (boltPass && boltPass.ready) boltPass.draw(null)
 
+    // ---- 大肥鱼：和闪电同一个位置（默认 framebuffer、不进 ACES）----
+    // 它是角色，不是场景元素：颜色应当和立绘一致，不该被色调映射压暗。
+    // 相机是固定的，所以固定世界坐标的四边形在屏幕上位置稳定，
+    // 但它仍然跟 FOV、分辨率、相机一起走 —— 这就是「在空间里」。
+    if (petPass && petPass.ready) {
+      // 【位移有两种走法】
+      //   A. 定时走（petMoveDur > 0）：按剩余距离 / 剩余时间算瞬时速度。
+      //      动作素材是 10 秒、不带位移，所以必须由引擎把这 10 秒走满 ——
+      //      跑动和位移同步，才不会「跑了 1 秒就到、剩下 9 秒原地跑」。
+      //      用「剩余/剩余」而不是固定速度：中途被改目标也能平滑接上，
+      //      最后几帧也不会冲过头。
+      //   B. 自由走（petMoveDur = 0）：按基础速度逼近。用于没有动作配合的位移
+      //      （比如贴玻璃站几秒后退回去）。
+      const dx = petMoveTarget.x - petParams.x
+      const dz = petMoveTarget.z - petParams.z
+      if (petMoveDur > 0) {
+        const k = Math.min(1, dt / Math.max(0.016, petMoveDur))
+        petParams.x += dx * k
+        petParams.z += dz * k
+        petMoveDur -= dt
+        if (petMoveDur < 0.02) petMoveDur = 0
+        if (Math.abs(dx) < 1e-3) petParams.x = petMoveTarget.x
+        if (Math.abs(dz) < 1e-3) petParams.z = petMoveTarget.z
+      } else {
+        // 两个轴分开限速，才不会有「斜着冲刺」的观感
+        if (Math.abs(dx) > 1e-3) {
+          petParams.x += Math.sign(dx) * Math.min(Math.abs(dx), dt * 1.6)
+        }
+        if (Math.abs(dz) > 1e-3) {
+          petParams.z += Math.sign(dz) * Math.min(Math.abs(dz), dt * 0.9)
+        }
+      }
+    }
+
     if (!started) {
       started = true
       document.body.classList.add('ready')
@@ -4060,6 +4477,9 @@ function main() {
       // 花也有自己的一套资源，同样要释放
       try { if (flowerPass) flowerPass.dispose() } catch (error) { /* 已经释放 */ }
       flowerPass = null
+      // 大肥鱼的 program / VAO / 纹理同样要带走
+      try { if (petPass) petPass.dispose() } catch (error) { /* 已经释放 */ }
+      petPass = null
     },
     () => {
       window.removeEventListener('message', onMessage)
@@ -4257,6 +4677,88 @@ function main() {
     if (Number.isFinite(v)) starBright = Math.min(1, Math.max(0, v))
   }
   window.__ossStar = () => starBright
+
+  // ---- 大肥鱼的两个入口 ----
+  // 纹理走这里：客户端先把视频帧抠成透明 canvas，再整张交进来。
+  // 传 null 表示「这一帧没有东西可画」，Pass 会退回一个淡淡的占位轮廓。
+  // 为什么不在引擎里做抠图：抠图要 getImageData/putImageData，
+  // 那是 2D canvas 的活；引擎手里只有 WebGL 上下文。分工在 PET-INTEGRATION.md
+  // 里已经定死，这里只负责「贴到 3D 四边形上」。
+  window.__ossPetTexture = (source) => {
+    if (!petPass || !petPass.ready) return false
+    // null = 主体被关掉了。清空纹理源，这个 Pass 就什么都不画 ——
+    // 比“传一张全透明的图”省一半开销，也不用让客户端造一张假图。
+    if (!source) { petPass.clear(); return false }
+    try {
+      petPass.upload(source, source.width || 0, source.height || 0)
+      return true
+    } catch (error) {
+      console.error(PET_PASS_LOG, 'texture upload failed', error)
+      return false
+    }
+  }
+  // 朝向与抬起：flip = 1 面朝左（side.png 原样），-1 面朝右。
+  window.__ossPetSet = (v) => {
+    if (!v || typeof v !== 'object') return
+    if (Number.isFinite(v.flip)) petParams.flip = v.flip < 0 ? -1 : 1
+    if (Number.isFinite(v.aspect)) petParams.aspect = Math.max(0.4, Math.min(2.0, v.aspect))
+    if (Number.isFinite(v.lift)) petParams.lift = Math.max(-2, Math.min(3, v.lift))
+  }
+  window.__ossPet = () => ({ ready: !!(petPass && petPass.ready), flip: petParams.flip, aspect: petParams.aspect, lift: petParams.lift })
+
+  // 大肥鱼的横向位置（世界坐标 x，米）。
+  // 客户端不直接改 petParams —— 位置要平滑，所以这里给的是「目标」，
+  // 由引擎每帧逼近（见 frame() 里的插值）。客户端只管下命令，不管插值。
+  //
+  // 两个参数：
+  //   x  横向偏移（米）。视线水平半视野随 z 变，所以这里不写死 ±3.2，
+  //      而是在插值时按当前 z 算一个可见宽度再钳 —— 走近了也能走到边上。
+  //   z  距离偏移（米）。正 = 后退（变小），负 = 靠近（变大）。
+  //      实际 z = PET_POS[2] + 偏移；PET_POS[2] = 8.5，所以可走 5..14 米。
+  // duration = 位移时长（秒）。传了就按「这段时间内准点到」走 ——
+  // 和动作素材对齐用（素材都是 10 秒）。不传就按基础速度自由走。
+  window.__ossPetMove = (x, z, duration) => {
+    if (Number.isFinite(x)) petMoveTarget.x = x
+    // z 是【距离相机的米数】，不是世界 z。范围 2.8 ~ 55 米。
+    //   近端 2.8 米：再近就只剩一块颜色，虚化也救不回来。
+    //   远端 55 米：那是「天边」，屏高约 4%，看不清脸朝哪边 ——
+    //   不用换背影素材，光靠距离它就「不看着你」了。
+    if (Number.isFinite(z)) petMoveTarget.z = Math.max(2.8, Math.min(55, z))
+    petMoveDur = Number.isFinite(duration) && duration > 0 ? duration : 0
+    return { x: petMoveTarget.x, z: petMoveTarget.z, dur: petMoveDur }
+  }
+  window.__ossPetPos = () => ({ x: petParams.x, z: petParams.z })
+  // 纯只读：当前目标是什么。没有副作用。
+  // 【为什么必须单独开一个】__ossPetMove 是「下命令」，它顺带会把 petMoveDur
+  // 重置成 0。之前调度器为了判断「在不在走」，拿 __ossPetMove(当前值) 去读目标，
+  // 每次读都等于取消掉正在进行的定时位移 —— 于是「走 10 秒」被打断成自由走，
+  // 人停在原地跑，只有后退（z 增大）还在慢慢动。
+  window.__ossPetTarget = () => ({ x: petMoveTarget.x, z: petMoveTarget.z })
+
+  // 某个纵深下，横向能走多远（米）。
+  // 客户端据此决定「这次往哪走」—— 它就是透视本身：
+  //   近处视野窄，横向最多走两三米就到边；远处视野宽，能走十几米。
+  // 余量按「角色本身有多宽」算，不是拍一个数：
+  //   角色世界高度 2.5 米、宽高比约 0.86 → 半宽约 1.1 米；
+  //   再加 0.4 米呼吸空间。原来减 1.0 是按瘦角色算的，
+  //   结果贴玻璃时（z=3 米）走到 ±1.8 米就已经半身在画外。
+  // 水平半视角 42.8°（FOV 55° 垂直、16:9 宽屏推出来的），tan ≈ 0.926。
+  window.__ossPetHalfWidth = (z) => {
+    // z 参数本身就是距离相机的米数，直接用，不用再换算。
+    const dist = Number.isFinite(z) ? z : 8.5
+    const view = Math.abs(dist) * 0.926
+    // 角色世界半宽固定 1.1 米（PET_HEIGHT * aspect / 2 ≈ 1.1），
+    // 世界尺寸不随距离变，只是它在屏幕上占的比例变。
+    const bodyHalf = 1.1
+    return Math.max(0.4, view - bodyHalf - 0.4)
+  }
+
+  // 时间流速倍率（0.1 ~ 10）。
+  // 为什么要有这个读口：引擎内部的云（cloudStep）收的是未缩放的 dt，
+  // 而 DOM 层上的云主体、角色调度器都在外面跑，它们拿不到 timeScale。
+  // 所以在这里统一暴露一次，两边共用一个数，才不会出现
+  // 「场景加速了、天上的云主体还是原速」这种脱节。
+  window.__ossTimeScale = () => timeScale
 
   last = performance.now()
   rafId = requestAnimationFrame(frame)

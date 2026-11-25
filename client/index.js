@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
     // 版本号同时是引擎脚本的缓存键（ocean-engine.js?v=VERSION）。
     // 每次改 static/ocean-engine.js 都必须把这里加一，否则浏览器会拿旧引擎，
     // 表现为「改了代码但页面没变化」——闪电不闪、隐藏模式不生效都是这个原因。
-    const VERSION = "1.89.0";
+    const VERSION = "1.147.0";
     const ASSET_BASE = "/dsh-weather-sandbox/";
     const STORE_KEY = "dsh-weather-sandbox/v1";
 
@@ -216,7 +216,7 @@ window.__ModuleLoader__.load({
     // 幅度按滑块语义定：需要大胆变化的（温度、云量）给大；不该乱跳的（光晕半径）给小。
     // 周期从 90 秒到 420 秒不等，肉眼看到的是「缓慢地变」，不是一起一伏。
     // 【自演化接管「天气本身」的那几个参数】
-    // 规则：默认由系统推动；用户一旦拖动某个滑杆，那个参数立刻交还给用户（记进 userHeld），
+    // 规则：默认由系统推动；玩家或 AI 一旦拖动某个滑杆，那个参数立刻交还给那一方（记进 heldBy），
     // 之后系统不再改它，直到用户关掉自演化再打开（重新从头接管）。
     //
     // 接管的：温度（决定雨还是雪）、湿度（决定下不下雨）、
@@ -231,9 +231,17 @@ window.__ModuleLoader__.load({
       lightningCount: { period: 340, amp: 0.35, phase: 1.90 },
     });
 
-    // 被用户「抢回去」的参数集合。用户拖动滑杆时写入，系统就不再碰它。
-    // 每次打开自演化会清空 —— 重新接管，符合「重新开始演化」的直觉。
-    const userHeld = new Set();
+    // 被「抢回去」的参数集合，按【谁抢的】分开记。
+    //   为什么是二维而不是一个 Set：
+    //   这一维原来只有「用户」。AI 接管要写同一个面板，但没有自己的那一维，
+    //   于是 AI 一调参就被记成用户 —— 自演化当场被自己关掉。
+    //   这不是 bug，是签名缺一维：调参的函数只说「调什么」，没说「谁调的」。
+    //
+    //   语义：某参数一旦被某方抢走，该方就压过自演化，之后自演化不再碰它。
+    //   两方都抢过同一参数时，后抢的覆盖先抢的（同一个人反复拖也走这条路）。
+    //   目前两方都写进同一份 settings，所以 effectiveSlider 只要「有人抢了」就返回设置值，
+    //   不需要区分是谁 —— 区分在 commitLive 那一层做：谁写 heldBy，谁就是抢占方。
+    const heldBy = Object.create(null);          // key → "user" | "ai"
 
     // 运行时状态（不存储）：active 时 base 记录用户打开前的值，t 持续推进。
     const evolveState = { active: false, t: 0, base: Object.create(null) };
@@ -257,6 +265,7 @@ window.__ModuleLoader__.load({
     // 雨雪「下一会就停、停一下又下」。所以起止用两个不同的阈值：
     //   没在下时，要超过 START 才起（不容易误触发）
     //   已经在下了，要跌到 STOP 以下才停（不容易被打断）
+    // 降水起止阈值（回滞）。
     const PRECIP_START = 0.004;
     const PRECIP_STOP = 0.0012;
     let wasRaining = false;
@@ -470,6 +479,12 @@ window.__ModuleLoader__.load({
         : live
           ? normalize(live)
           : normalize(readLegacy());
+      // 【草地开关不持久化】
+      // 它是「临时看一眼草地」的开关，不是长期偏好 —— 上次开过、这次一进来
+      // 就铺满草，会让人以为插件坏了（实测反馈就是「怎么默认勾选」）。
+      // 所以读设置时无条件把它按回关；用户在本次会话里勾上照样有效，
+      // 只是下次重新加载时不记它。
+      settings.groundVisible = false;
       return { ...settings };
     }
 
@@ -547,8 +562,8 @@ window.__ModuleLoader__.load({
       const s = readSettings();
       const track = EVOLVE_TRACKS[key];
       if (!evolveState.active || !track) return s[key];
-      // 用户拖动过这个滑杆 → 交还给用户，系统不再改它
-      if (userHeld.has(key)) return s[key];
+      // 被任何一方抢走过这个滑杆 → 交还给那一方，系统不再改它
+      if (heldBy[key]) return s[key];
       // 湿度走脉冲，不走正弦 —— 理由见 HUMID_PULSE 上面那段。
       if (key === "humidPos") return humidPulseAt(evolveState.t);
       const base = evolveState.base[key];
@@ -565,9 +580,9 @@ window.__ModuleLoader__.load({
         evolveState.t = 0;
         evolveState.base = Object.create(null);
         for (const key of Object.keys(EVOLVE_TRACKS)) evolveState.base[key] = s[key];
-        // 重新打开 = 重新接管：清掉「用户抢回去」的记录，
-        // 否则上次手动调过的参数会在下次开启时仍然归用户，和「重新开始演化」的直觉不符。
-        userHeld.clear();
+        // 重新打开 = 重新接管：清掉「被抢回去」的记录，
+        // 否则上次被抢走的参数会在下次开启时仍然归对方，和「重新开始演化」的直觉不符。
+        for (const key of Object.keys(heldBy)) delete heldBy[key];
       } else {
         // 关掉时把当前漂移到的值冻结进设置，让用户从「看到的状态」接着调，
         // 而不是突然跳回打开前的旧值。
@@ -2447,6 +2462,500 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       return lang.indexOf("zh") === 0 ? COPY.zh : COPY.en;
     }
 
+
+
+
+
+
+
+
+
+    // ======================================================================
+    //  大肥鱼 —— 只做一件事：把当前画面抠成一张带 alpha 的 canvas，交给引擎
+    //
+    //  引擎那半边（createPetPass）负责画进 3D 场景。这里不管画，只管「给素材」。
+    //
+    //  三层资源，全都不上屏：
+    //    img   —— 立绘来源，本身有 alpha，直接缩进 canvas
+    //    video —— 只当解码器（yuv420p 没有透明通道，得逐帧抠黑）
+    //    cv    —— 抠好的那一帧，唯一交给 __ossPetTexture 的东西
+    //
+    //  抠图阈值来自 PET-INTEGRATION.md，别改：背景纯黑占 82%，角色最暗也亮于 25；
+    //  取 max(r,g,b) 而不是平均 —— 深蓝头发平均下来会被误判成背景。
+    // ======================================================================
+    function createPetEntity() {
+      const BASE = "/dsh-weather-sandbox/pet/";
+      const CUT_LO = 18, CUT_HI = 60;
+
+      const img = document.createElement("img");
+      img.src = BASE + "side.png";
+      img.alt = "";
+      img.style.display = "none";
+
+      const video = document.createElement("video");
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.preload = "auto";
+      video.style.cssText = "position:absolute;width:0;height:0;opacity:0;pointer-events:none";
+
+      // 尺寸必须等于素材原尺寸，写死。动态尺寸会和视频对不上、拉伸变形。
+      const cv = document.createElement("canvas");
+      cv.width = 256;
+      cv.height = 144;
+      const ctx = cv.getContext("2d", { willReadFrequently: true });
+
+      let clip = null;       // 当前动作名；null = 立绘
+      let active = true;     // 主体模块开关
+      let raf = 0;
+      let dead = false;
+      // 把时间流速同步到当前这段视频的播放速度。每帧调用。
+      // 【以浏览器里的真实值为准，不自己记缓存】
+      // 原来记一个 appliedRate，设过一次就不再重试 —— 但 video.play()、换源、
+      // 解码器就绪这些时机都可能把 playbackRate 重置回 1，一旦被重置，
+      // 因为缓存里记的还是新值，就再也不会写回去，表现为「有时生效有时不生效」。
+      // 现在每次读 video.playbackRate 比较：写失败了下帧自动重试，代价是一次属性读取。
+      function syncRate() {
+        const ts = typeof window.__ossTimeScale === "function" ? window.__ossTimeScale() : 1;
+        const want = Math.max(0.25, Math.min(8, Number.isFinite(ts) && ts > 0 ? ts : 1));
+        if (Math.abs(video.playbackRate - want) < 0.01) return;
+        try { video.playbackRate = want; } catch (error) { /* 浏览器不接受就下帧再试 */ }
+      }
+
+      // ---- 出一帧：把源画进 canvas，再把黑底改成透明，交给引擎 ----
+      function frame() {
+        if (!ctx || !active || dead) return;
+        ctx.clearRect(0, 0, 256, 144);
+        if (clip) {
+          if (video.readyState < 2) return;               // 还没解出帧
+          ctx.drawImage(video, 0, 0, 256, 144);
+        } else {
+          if (!img.complete || !img.naturalWidth) return;
+          // 立绘是竖图，按 contain 缩进 16:9 的框里会留边，所以居中缩放
+          const s = Math.min(256 / img.naturalWidth, 144 / img.naturalHeight);
+          const w = img.naturalWidth * s, h = img.naturalHeight * s;
+          ctx.drawImage(img, (256 - w) / 2, (144 - h) / 2, w, h);
+        }
+
+        let data;
+        try {
+          data = ctx.getImageData(0, 0, 256, 144);
+        } catch (error) {
+          // 拿不到像素（跨域限制）：立绘本就有 alpha，直接给；视频没法救，跳过
+          if (!clip) push();
+          return;
+        }
+        const px = data.data;
+        for (let i = 0; i < px.length; i += 4) {
+          const m = px[i] > px[i + 1] ? (px[i] > px[i + 2] ? px[i] : px[i + 2])
+                                      : (px[i + 1] > px[i + 2] ? px[i + 1] : px[i + 2]);
+          px[i + 3] = m < CUT_LO ? 0 : m < CUT_HI ? ((m - CUT_LO) * 255 / (CUT_HI - CUT_LO)) | 0 : 255;
+        }
+        ctx.putImageData(data, 0, 0);
+        push();
+      }
+
+      // ---- 交给引擎 ----
+      // 宽高比随来源变（立绘 363:420，视频 256:144），引擎靠它决定四边形多宽。
+      function push() {
+        if (typeof window.__ossPetTexture !== "function") return;
+        if (!window.__ossPetTexture(cv)) return;
+        const aspect = clip ? 256 / 144 : (img.naturalWidth || 363) / (img.naturalHeight || 420);
+        if (typeof window.__ossPetSet === "function") window.__ossPetSet({ aspect });
+      }
+
+      // ---- 帧循环：只在播动作时跑。立绘是静态的，出一帧就够 ----
+      function tick() {
+        if (dead || !clip) { raf = 0; return; }
+        raf = requestAnimationFrame(tick);
+        syncRate();
+        frame();
+      }
+      function startTick() {
+        if (!raf) raf = requestAnimationFrame(tick);
+      }
+      function stopTick() {
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      // 唯一的停播路径：清掉动作名、回到立绘、出最后一帧。
+      function clear() {
+        clip = null;
+        stopTick();
+        frame();
+      }
+
+      // ---- 切一段动作。done 在播完时调用；不传就回立绘 ----
+      // opts.loop：播完一遍就回绕（用于「待得久一点」的动作，如撸猫、吹笛子）。
+      //   回绕时不触发 done —— 由调度器自己的定时器决定什么时候收。
+      function play(name, done, opts) {
+        if (dead || !name) return;
+        const looped = !!(opts && opts.loop);
+        video.onended = () => {
+          video.onended = null;
+          if (dead) return;
+          if (looped) {
+            // 回到开头继续播，不通知调度器（它还不想收）
+            video.currentTime = 0;
+            video.play().then(() => syncRate()).catch(() => {});
+            return;
+          }
+          if (typeof done === "function") done();
+          else clear();
+        };
+        video.src = BASE + "clip/" + encodeURIComponent(name) + ".webm";
+        video.loop = looped;
+        video.currentTime = 0;
+        // 时间流速作用到动作本身。倍率的实际写入在 syncRate() 里 ——
+        // 那里每帧都会检查，所以播放中拖滑杆也会立刻跟上，不用等这一段播完。
+        clip = name;
+        syncRate();
+        // play() 之后同步一次：部分浏览器会在真正开始播放时把 playbackRate 重置回 1。
+        video.play().then(() => {
+          syncRate();
+          startTick();
+        }).catch(() => {
+          console.warn("[pet] clip autoplay blocked:", name);
+          clear();
+        });
+      }
+
+      // ---- 等引擎就绪再开工 ----
+      // 引擎脚本异步插入，__ossPetTexture 出现前调用会被吞掉。超时 30 秒放弃。
+      function boot(onReady) {
+        let tries = 0;
+        const tick = () => {
+          if (dead) return;
+          if (typeof window.__ossPetTexture !== "function") {
+            if (++tries > 150) return;
+            setTimeout(tick, 200);
+            return;
+          }
+          frame();                                  // 先把立绘推过去
+          if (typeof onReady === "function") onReady();
+        };
+        if (img.complete) tick();
+        else img.addEventListener("load", tick, { once: true });
+        img.addEventListener("error", tick, { once: true });   // 图挂了也别卡住
+      }
+
+      return {
+        boot,
+        play,
+        stop: clear,
+        // 朝向：flip = 1 面朝左（side.png 原样），-1 面朝右
+        face(dir) {
+          if (typeof window.__ossPetSet === "function") window.__ossPetSet({ flip: dir < 0 ? -1 : 1 });
+        },
+        // 走到 (x, z)，duration 秒内到位。z 是「离相机多少米」，越大越远。
+        moveTo(x, z, duration) {
+          if (typeof window.__ossPetMove !== "function") return false;
+          window.__ossPetMove(x, z, duration);
+          return true;
+        },
+        // 显隐：停止产帧并清空纹理源，屏幕上一点都不留
+        setActive(on) {
+          active = on !== false;
+          if (!active) {
+            stopTick();
+            try { video.pause(); } catch (error) { /* 已经停了 */ }
+            if (typeof window.__ossPetTexture === "function") window.__ossPetTexture(null);
+          } else if (clip && video.readyState >= 2) {
+            // 重新播放时也要把倍率写回去：play() 可能把它重置成 1。
+            try { video.play().then(() => { syncRate(); startTick(); }).catch(() => {}); } catch (error) { /* 下一帧再说 */ }
+          } else {
+            frame();
+          }
+        },
+        dispose() {
+          dead = true;
+          stopTick();
+          video.onended = null;
+          try { video.pause(); video.removeAttribute("src"); video.load(); } catch (error) { /* 已经停了 */ }
+          img.removeAttribute("src");
+          cv.width = 1;
+          cv.height = 1;
+        },
+      };
+    }
+
+    // ======================================================================
+    //  大肥鱼的行为调度 —— 单队列，一段接一段
+    //
+    //  为什么是一个队列而不是多个定时器：
+    //    素材每段 10 秒、同一时刻只能播一段。多个定时器各自到点就喊，
+    //    抢输的那个被 play() 的守卫吞掉 —— 玩家看到的几乎只有先到的那个。
+    //    一个队列：播完一段 → 抽下一段 → 立刻播。永远有事做，不抢位。
+    //
+    //  抽签分两层：先抽「组」，再抽组内动作。
+    //    平铺 50 个动作一起抽的话，9 个吃的会占掉近两成，看起来像在杂耍。
+    //    分组之后「走路占 30%、吃占 5%」，比例才是可控的。
+    //
+    //  有些动作天然要待久一点（睡觉、撸猫、吹笛子），不按一刀切的 10 秒：
+    //    表里写了 hold 的，播一遍之后接着循环，循环到时间才收。
+    // ======================================================================
+    function createPetScheduler(pet, win) {
+      const NEAR_Z = 3.0;
+      const FAR_MIN = 30, FAR_MAX = 55;
+      const CLIP_SEC = 10.04;
+
+      // ---- 动作表 ----
+      // w    组内权重
+      // hold 循环时长（秒，[min,max]）。没有 = 播一遍就切
+      // walk 是否要配位移
+      const GROUPS = {
+        walk: { weight: 30, clips: ["漂浮踏步", "螃蟹走路", "左转奔跑"] },
+        idle: { weight: 20, clips: ["东张西望", "哈欠连天", "超大伸懒腰"] },
+        daily: { weight: 10, clips: ["晨间刷牙", "照镜子", "悠闲哼歌", "打瞌睡被惊醒"] },
+        play: { weight: 10, clips: ["撸猫", "原地专心玩魔方", "下五子棋", "三球抛接", "扑克魔术", "荡秋千"] },
+        season: { weight: 8, clips: ["被落叶淹没", "堆雪人", "摇扇纳凉", "玩水枪"] },
+        talent: { weight: 8, clips: ["吹笛子", "小提琴演奏", "轻快摇摆舞", "可爱宅舞", "优雅女仆舞"] },
+        eat: { weight: 5, clips: ["期待开饭", "吃饭·碗饭", "吃饭团", "吃早餐", "吃午餐", "吃晚餐", "吃西瓜", "大口吃零食", "偷吃零食被抓住"] },
+        mood: { weight: 5, clips: ["点击回应-害羞惊讶", "深度思考碎碎念", "用鲸鱼尾巴拍打地面"] },
+        rare: { weight: 3, clips: ["蝴蝶蜜蜂环绕头顶开花", "原地重力下蹲压缩"] },
+      };
+
+      // 需要循环播放、待久一点的动作。没列在这里的一律播一遍。
+      const HOLD = {
+        "撸猫": [20, 40],
+        "吹笛子": [20, 30],
+        "小提琴演奏": [20, 30],
+        "悠闲哼歌": [30, 60],
+        "原地专心玩魔方": [15, 35],
+      };
+
+      const GROUP_KEYS = Object.keys(GROUPS);
+      const GROUP_TOTAL = GROUP_KEYS.reduce((s, k) => s + GROUPS[k].weight, 0);
+
+      let lastClip = "";
+      let facing = -1;
+      let disposed = false;
+      let queueTimer = 0;
+      let busy = false;          // 正在跑一段，期间的插队要排队
+
+      // 环境事件的冷却
+      const lastTrigger = { rain: 0, thunder: 0, clear: 0, cold: 0, hot: 0 };
+
+      const rand = (a, b) => a + Math.random() * (b - a);
+      const now = () => Date.now();
+      const roll = (prob) => Math.random() < prob;
+
+      // 时间流速。倍率越快，等待越短、动作播放越快（playbackRate 在引擎侧同步）。
+      function ts() {
+        const v = typeof win.__ossTimeScale === "function" ? win.__ossTimeScale() : 1;
+        return Number.isFinite(v) && v > 0 ? Math.min(v, 8) : 1;
+      }
+      const wait = (seconds) => (seconds * 1000) / ts();
+
+      // 某个纵深下横向能走多远。只问引擎，不在客户端重算一遍。
+      function halfWidth(z) {
+        try {
+          if (typeof win.__ossPetHalfWidth === "function") {
+            const h = win.__ossPetHalfWidth(z);
+            if (Number.isFinite(h) && h > 0) return h;
+          }
+        } catch (error) { /* 引擎没起来 */ }
+        return 3;
+      }
+
+      // ---- 打雷抖屏 ----
+      function shake() {
+        const el = document.getElementById("__dsh-weather-sandbox");
+        if (!el) return;
+        const frames = [[3, -2], [-2, 3], [1, -1], [0, 0]];
+        let i = 0;
+        const tick = () => {
+          if (i >= frames.length) { el.style.transform = ""; return; }
+          el.style.transform = "translate(" + frames[i][0] + "px," + frames[i][1] + "px)";
+          i++;
+          setTimeout(tick, 55);
+        };
+        tick();
+      }
+
+      // ---- 抽签：先抽组，再抽组内 ----
+      function pick() {
+        for (let guard = 0; guard < 10; guard++) {
+          let r = Math.random() * GROUP_TOTAL;
+          let g = GROUP_KEYS[GROUP_KEYS.length - 1];
+          for (const k of GROUP_KEYS) {
+            r -= GROUPS[k].weight;
+            if (r <= 0) { g = k; break; }
+          }
+          const list = GROUPS[g].clips;
+          const clip = list[(Math.random() * list.length) | 0];
+          if (clip !== lastClip) return { clip, group: g };
+        }
+        return { clip: GROUPS.idle.clips[0], group: "idle" };
+      }
+
+      // ---- 队列主体 ----
+      // 每段结束都回到这里：挑一段、该走就走、播、播完再回来。
+      function step() {
+        if (disposed) return;
+        busy = false;
+        const { clip, group } = pick();
+        lastClip = clip;
+
+        // 走路要配位移（引擎按 10 秒走满）。
+        // 距离分三档：5% 贴脸、25% 走近、70% 待在天边。
+        if (group === "walk") {
+          const r = Math.random();
+          const tz = r < 0.05 ? 2.8
+                   : r < 0.30 ? rand(NEAR_Z, 9)
+                   : rand(FAR_MIN, FAR_MAX) * 0.6 + 8;
+          const hw = halfWidth(tz);
+          pet.moveTo(rand(-hw, hw), tz, CLIP_SEC);
+        }
+
+        const hold = HOLD[clip];
+        // 睡觉是唯一一个「多段 + 带位移 + 会待很久」的动作，单独走一条流程。
+        // 它不进普通队列：普通队列每段播完就切，睡觉要 开始→循环 N 分钟→起来 三连。
+        if (clip === "睡觉-开始") {
+          sleepSequence();
+          busy = true;
+          return;
+        }
+        pet.play(clip, () => {
+          if (disposed) return;
+          if (hold) loopThenNext(clip, rand(hold[0], hold[1]));
+          else next();
+        }, hold ? { loopAfter: true } : undefined);
+        busy = true;
+      }
+
+      // 播完一遍之后继续循环，循环到时间再收。
+      // 引擎那边 loop 只影响视频是否回绕；这里用定时器控制「什么时候离开」。
+      function loopThenNext(clip, seconds) {
+        pet.play(clip, next, { loopAfter: true, loop: true });
+        clearTimeout(queueTimer);
+        queueTimer = setTimeout(() => {
+          if (disposed) return;
+          next();
+        }, wait(seconds));
+      }
+
+      // ---- 睡觉：走到角落 → 开始 → 循环几分钟 → 起来 → 走回来 ----
+      // 三件事按顺序排，中间每一步都要等上一段播完。
+      // 位置选画面左下的中景：那里有草、不挡画面，而且离相机不远，
+      // 玩家能看清它真的躺下了 —— 这就是「看着自己的宠物睡觉」。
+      function sleepSequence() {
+        if (disposed) return;
+        // 1. 走到角落（10 秒内到位，和「睡觉-开始」的时长对齐）
+        pet.moveTo(rand(-3.2, -2.2), rand(5.5, 7.5), CLIP_SEC);
+        pet.play("睡觉-开始", () => {
+          if (disposed) return;
+          // 2. 循环睡 1~3 分钟
+          pet.play("睡觉-循环", () => {}, { loop: true });
+          clearTimeout(queueTimer);
+          queueTimer = setTimeout(() => {
+            if (disposed) return;
+            // 3. 起来
+            pet.play("睡觉-起来", () => {
+              if (disposed) return;
+              // 4. 走回中景再回队列
+              pet.moveTo(rand(-1.5, 1.5), rand(9, 14), CLIP_SEC);
+              next();
+            });
+          }, wait(rand(60, 180)));
+        });
+      }
+
+      function next() {
+        if (disposed) return;
+        busy = false;
+        clearTimeout(queueTimer);
+        queueTimer = setTimeout(step, wait(rand(0.6, 2.4)));
+      }
+
+      // ---- 环境事件：插队 ----
+      function sampleWeather() {
+        if (typeof win.__openSeaShelter !== "object" || !win.__openSeaShelter) return null;
+        let d;
+        try { d = win.__openSeaShelter.drive(); } catch (error) { return null; }
+        if (!d || !d.ready) return null;
+        const precip = d.vaporPrecip || 0;
+        const tempC = Number.isFinite(d.centerC) ? d.centerC : 20;
+        return {
+          rain: precip > 0.01,
+          thunder: precip > 0.02 && d.updraft > 0.15,
+          clear: precip < 0.002 && (d.humidityPct || 0) < 85,
+          cold: tempC < 0,
+          hot: tempC > 30,
+        };
+      }
+
+      // 天气反应表。加一条新反应只要加一行。
+      // 季节类动作（堆雪人/摇扇/玩水枪/被落叶淹没）挂在这里 —— 它们是「对环境有反应」，
+      // 不是「随机抽到」。玩家看到它在雪地里堆雪人，那才像听懂了天气。
+      const REACTIONS = [
+        { key: "thunder", prob: 1.0,  cool: 15000, clip: "被吓一跳" },
+        { key: "rain",    prob: 0.45, cool: 30000, clip: "鲸鱼吐泡泡特效" },
+        { key: "clear",   prob: 0.5,  cool: 40000, clip: "点击回应-开心跃动" },
+        { key: "cold",    prob: 0.6,  cool: 45000, clip: "原地小憩沉眠" },
+        { key: "hot",     prob: 0.6,  cool: 60000, clip: "摇扇纳凉" },
+      ];
+
+      function reactWeather() {
+        if (disposed) return;
+        const s = sampleWeather();
+        if (!s) return;
+        const t = now();
+        for (const r of REACTIONS) {
+          if (s[r.key] && t - lastTrigger[r.key] > r.cool && roll(r.prob)) {
+            lastTrigger[r.key] = t;
+            if (r.key === "thunder") shake();
+            // 打断当前这一段。被打断的那一段不会再回调，所以这里负责把队列接回来。
+            clearTimeout(queueTimer);
+            pet.play(r.clip, () => { if (!disposed) next(); });
+            break;   // 一次只反应一件事，别在雷雨里连切四个动作
+          }
+        }
+      }
+
+      // ---- 换边：纯粹让侧脸换一边，不影响正在播的动作 ----
+      function flipSide() {
+        if (disposed) return;
+        facing = -facing;
+        pet.face(facing);
+        setTimeout(flipSide, wait(rand(20, 55)));
+      }
+
+      let weatherTimer = 0;
+      let sleepTimer = 0;
+
+      // 睡觉单独定时：每 8~15 分钟想睡一次。
+      // 不走队列抽签 —— 抽签意味着「任何时候都可能突然躺下」，
+      // 定时才有「它活动久了、累了」的感觉。
+      // 到点时如果正在忙（走路/插播中）就跳过这一轮，等下一个周期。
+      function trySleep() {
+        if (disposed) return;
+        if (!busy) sleepSequence();
+        scheduleSleep();
+      }
+      function scheduleSleep() {
+        clearTimeout(sleepTimer);
+        sleepTimer = setTimeout(trySleep, wait(rand(480, 900)));
+      }
+
+      return {
+        start() {
+          if (disposed) return;
+          pet.face(facing);
+          step();                                        // 一进场就在动，才像活的
+          setTimeout(flipSide, wait(rand(12, 30)));
+          weatherTimer = setInterval(reactWeather, Math.max(100, 660 / ts()));
+          scheduleSleep();
+        },
+        dispose() {
+          disposed = true;
+          clearTimeout(queueTimer);
+          clearInterval(weatherTimer);
+          clearTimeout(sleepTimer);
+        },
+      };
+    }
+
     // ----------------------------------------------------------------- apply
 
     function apply(ctx) {
@@ -2461,6 +2970,10 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       const copy = pickCopy();
       const state = readSettings();
 
+      // 系统「减少动态效果」：云主体照样画，只是把自主漂移和呼吸停掉。
+      const motionQuery = typeof win.matchMedia === "function" ? win.matchMedia("(prefers-reduced-motion: reduce)") : null;
+      const reduced = !!(motionQuery && motionQuery.matches);
+
       const pane = doc.createElement("div");
       pane.id = IDS.pane;
       pane.setAttribute("aria-hidden", "true");
@@ -2470,8 +2983,12 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       weather.id = IDS.weather;
       weather.style.cssText = "position:absolute;inset:0;z-index:1;pointer-events:none";
 
+      // 大肥鱼不占 DOM 层：它由引擎画进 3D 场景（见 createPetPass）。
       pane.append(weather);
       (doc.body || doc.documentElement).appendChild(pane);
+
+      const petEntity = createPetEntity();
+      const petScheduler = createPetScheduler(petEntity, win);
 
       const uiStyle = doc.createElement("style");
       uiStyle.id = IDS.ui;
@@ -2480,8 +2997,6 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       (doc.head || doc.documentElement).appendChild(uiStyle);
 
       const engine = createWeatherEngine(weather);
-      const motion = typeof win.matchMedia === "function" ? win.matchMedia("(prefers-reduced-motion: reduce)") : null;
-      const reduced = !!(motion && motion.matches);
 
       // ======================================================================
       //  联动总图 —— 雷雨昏暗（一级），雨雾柔化（独立链路）
@@ -2508,7 +3023,10 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       //       接管标记只在「闪电关掉」或「离开雨场景」时清除。
       //    3. 只做「压暗」，不做「改形状」：雷雨天要一整片压下来的黑云。
       // ======================================================================
-      let stormMood = false;
+      // 雷暴压暗的强度 0..1，不是布尔。
+      // 布尔的话「进入雷暴」和「离开雷暴」都是瞬间切换，画面直接闪一下黑/闪一下亮。
+      // 改成数值 + 每拍逼近：压暗要一两秒才到位，也要一两秒才恢复 —— 和云聚集/散开同节奏。
+      let stormDim = 0;
       // 上一次真正推给引擎的场景。驱动层每拍重算形态，只有真的变了才重绘 ——
       // setScene 会重建雨滴数组，每拍都调会让画面卡顿。
       let lastShape = "none";
@@ -2629,6 +3147,9 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         };
         if (!settings.autoCycle) patch.t = settings.time;
         // 直连不需要等 oceanStarted：引擎脚本一加载完就会挂上 __ossSeaSet。
+        // 探针：确认倍率真的到了引擎那一侧。刷完页面拖「时间流逝」，看 Console。
+        console.log("[ts] client sends", patch.timeScale, "→ engine has",
+          typeof win.__ossTimeScale === "function" ? win.__ossTimeScale() : "no-api");
         if (typeof win.__ossSeaSet === "function") {
           win.__ossSeaSet(patch);
           return;
@@ -3099,11 +3620,18 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
             : NaN;
           shape = shapeFor(tempC, vaporRef.precip || 0);
         } catch (error) { shape = "none"; }
-        // 闪电联动：雷雨昏暗 = 闪电开 + 当前真的在下雨。
-        // 这个判断必须放在场景算出来之后 —— 场景已经不由用户选，而是算出来的。
+        // 闪电联动：雷雨昏暗 = 闪电开 + 正在下雨 + 气压在快速下降。
+        // 第三个条件（updraft）是关键：只靠「闪电开 + 下雨」的话，
+        // 玩家把湿度拉高、天气一直阴着，stormMood 就永久为真 ——
+        // 云量被推满、太阳被压到 30%，整个屏幕一直是灰的（观感灾难，而且没法玩）。
+        // 加上 updraft 之后，只有「气压正在崩」的那一段才是真雷雨，
+        // 其余时候只是普通下雨，天该多大亮就多大亮。
         const rainingNow = shape === "rain";
         if (current.lightning !== true || !rainingNow) clearTaken();
-        stormMood = current.lightning === true && rainingNow;
+        // 目标是 0 或 1，每拍逼近 18% —— 约 1 秒到位，不会闪。
+        const stormWant = current.lightning === true && rainingNow && computeUpdraft() > 0.10 ? 1 : 0;
+        stormDim += (stormWant - stormDim) * 0.18;
+        if (Math.abs(stormWant - stormDim) < 0.01) stormDim = stormWant;
         if (shape === "none") {
           engine.setScene("none");
           engine.setIntensity(0);
@@ -3352,7 +3880,11 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 底部同样带「设为默认 / 恢复默认」，只针对草地这几项。
       const grassPanel = doc.createElement("div");
       grassPanel.className = "oss-subpanel";
-      grassPanel.hidden = true;
+      // 初始隐藏：用行内 display，不用 hidden 属性。
+      // 全文件只有这一套状态（display 显式 "block"/"none"），不再让 hidden
+      // 和 CSS 的 [hidden]{display:none!important} 一起参与判断 —— 两者各管一半
+      // 就会互相打架，表现成「点开之后收不回去」。
+      grassPanel.style.display = "none";
       grassPanel.innerHTML = [
         // ---- 草地 ----
         // 独立地形层：和海洋同一条管线、同一套日光与风，但自己管理自己的绘制。
@@ -3386,6 +3918,12 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         '<input type="range" id="oss-wetness" min="0" max="100" step="1" aria-labelledby="oss-wetness-label" />',
         '</div>',
         '</div>',
+        '</div>',
+        // ---- 主体模块（试验阶段）----
+        // 默认开。关掉就回到纯天气沙盒 —— 没有人看着你。
+        '<div class="oss-section"><div class="oss-section-title">主体模块 <span style="opacity:.55;font-weight:400">（试验阶段）</span></div>',
+        '<div class="oss-switch"><label for="oss-pet-on">鱼主体</label>',
+        '<input type="checkbox" id="oss-pet-on" checked /></div>',
         '</div>',
         '<div class="oss-foot"><span class="oss-hint">' + copy.otherTerrain + '</span>',
         '<span class="oss-foot-actions">',
@@ -3508,13 +4046,18 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         // 雷雨昏暗只「压暗」，不改形状：团结度/透明度保持用户设置。
         // 逐参数判断：被你接管的那个用你的值，其余照常联动。
         // 「!taken.x ? 联动值 : 用户值」—— 用户没碰过就按联动走。
-        if (!stormMood) {
+        if (stormDim < 0.5) {
           // 驱动层接入：气压降 → 生云、气压升 → 散云。
           // 只加在「用户没接管 amount」时，幅度收敛到 ±12（原来是 ±30，那会让云量
           // 每拍跳一大截，太阳被闪）；再经 cloudDrivePush 低通过滤。
           const press = getPressureSignal();
           const target = taken.amount ? 0 : (press.fall - press.rise) * 12;
+          // 平滑后再钳一次。
+          // 没有上限的话，气压长期单向（比如一直上升）会让 cloudDrivePush 一路漂到
+          // 负几十甚至上百，把用户的云量整个抵消掉 —— 表现就是「云完全没了」。
+          // ±30 是「气压能把云推走多少」的合理范围，再多就该由用户滑杆决定。
           cloudDrivePush += (target - cloudDrivePush) * 0.15;
+          cloudDrivePush = Math.max(-30, Math.min(30, cloudDrivePush));
           // 夜云衰减：入夜后天上的云淡下去，月亮和星星才有机会露出来。
           // 但只在用户「没接管云量」时生效 —— 用户拉过滑竿就说明他要的就是这个量，
           // 夜里悄悄把他设的 100 压成 55 是越权（铁律：不碰用户滑杆）。
@@ -3671,13 +4214,10 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         if (!waitForEngine(win.__ossSunSet, sunRetry)) return;
         sunRetry.count = 0;
         // 闪电连锁 · 光这一路（完整链路见 paint 上方的大段注释）。
-        // 雷雨昏暗时太阳「钻进云里」：
-        //   本体 ×0.3 → 只剩一点轮廓，不再是一颗亮太阳
-        //   光晕 → 0   → 被云挡住
-        //   光束 ×0.35 → 丁达尔光散掉
+        // 雷雨昏暗时太阳钻进云里：本体 ×0.3、光晕 ×0.35、光束 ×0.35。
         // 光效开关（sunUI.enabled）始终由用户说了算，昏暗态只乘系数，不强行关掉。
-        // 光这一路：只要用户没动过光，就跟随断链的昏暗联动，哪怕云那边被接管过。
-        const dim = stormMood && !taken.sun;
+        // 雷暴压暗强度 0..1（已平滑）。0 = 不压，1 = 压到最暗。
+        const dim = stormDim;
         // 雨反哺光：雨大时空气里全是水，太阳被雨幕「柔化」而不是「吞掉」——
         //   光晕变大变弥散（水滴散射，不是云遮挡），
         //   本体和光束略降，但保留轮廓。
@@ -3705,7 +4245,13 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         // 0..1 → 0.72..1.10：海面(1.0)略亮、森林(0.6)中性、沙漠(0.35)压暗
         const reflectK = 0.72 + reflectivity * 0.38;
         // 先在「用户值」上叠雨雾柔化，再叠闪电的吞没，两者不互相覆盖
-        const glowAfterRain = baseGlow * (1 - 0.25 * wet) * reflectK;
+        // 【雨不再压暗】暗不暗只由云量决定。
+        // 原来这里乘了 (1 - 0.25*wet)：下雨就压光晕、压环境光，雨一停立刻弹亮 ——
+        // 那就是「阴天一瞬间变晴」的来源。湿度和亮度是两条独立的物理量，
+        // 不该让雨势直接拧灯泡。云多了自然就暗，那是云该管的事。
+        // 保留的只有「雨雾柔化」：光晕变大变弥散（水滴散射），这是可见的物理现象，
+        // 而且它只改形状不改亮度，不会让画面忽明忽暗。
+        const glowAfterRain = baseGlow * reflectK;
         const radiusAfterRain = Math.min(0.018, baseRadius * (1 + 2.2 * wet));
         // 光效开关是用户明确的指令，联动不能把它压到「看着像没开」。
         // 原来的 0.35 在昏暗画面里几乎不可见，用户会以为勾选框坏了。
@@ -3716,8 +4262,9 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           // 动过一版会直接把太阳放大 8 倍、光晕消失，肉眼立刻能看出穿帮。
           // 「太阳亮度」滑杆只是在它上面乘一个倍率（默认 1.0 = 完全不变），
           // 不再是替换值。这样默认状态下和改动之前逐像素一致。
-          sunDiscScale: (dim ? glowAfterRain * 0.3 : glowAfterRain) * sunReal("sunBright", sunUI.sunBright),
-          glowRadius: dim ? baseRadius * 0.35 : radiusAfterRain,
+          // 压暗改成按 dim 插值：0 时原样，1 时压到 60%（原来直接 30%，太狠了）。
+          sunDiscScale: glowAfterRain * (1 - 0.4 * dim) * sunReal("sunBright", sunUI.sunBright),
+          glowRadius: baseRadius * (1 - 0.25 * dim) * (1 + 2.2 * wet),
           // 月亮亮度：0..2 倍，50 = 1.0（原样）。
           // 引擎在 moonLight 的调用处乘它，整体缩放月盘 / 月晕 / 大气辉光，
           // 不碰月亮的几何计算，所以既不会糊，也不会消失。
@@ -3734,7 +4281,8 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           // 现在把太阳亮度的倍率（0..2，默认 1.0）也乘进来：
           //   50 → 1.0 倍（和以前完全一致）
           //   100 → 2 倍环境光（引擎侧 clamp 到 1.8，防止草地过曝）
-          effectGlobalScale: sunUI.enabled ? (dim ? 0.75 : (1 - 0.2 * wet) * lightK) : 0,
+          // 环境光不再随雨势变化：只由用户滑杆和雷暴压暗决定。
+          effectGlobalScale: sunUI.enabled ? lightK * (1 - 0.35 * dim) : 0,
         });
       }
 
@@ -4906,6 +5454,8 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         panel.hidden = !open;
         fab.setAttribute("aria-expanded", open ? "true" : "false");
         if (open) {
+          // 子面板默认收起（display="none"），由「其他地形」按钮打开。
+          // 这里不动它 —— 主面板重开时子面板保持收起是符合直觉的。
           previousFocus = doc.activeElement;
           const first = panel.querySelector("input, button");
           if (first instanceof HTMLElement) first.focus();
@@ -4915,7 +5465,9 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           if (statusTimer) { win.clearInterval(statusTimer); statusTimer = 0; }
           // 主面板关掉时，左侧的草地子面板也要一起收起，
           // 否则会留一个没有归属的悬浮框挂在屏幕上。
-          grassPanel.hidden = true;
+          //
+          // 只用一个状态：行内 display。不再碰 hidden 属性。
+          grassPanel.style.display = "none";
           const tb = panel.querySelector(".oss-terrain-btn");
           if (tb) tb.setAttribute("aria-expanded", "false");
           if (previousFocus instanceof HTMLElement) {
@@ -4958,15 +5510,36 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
 
       let sliderFrame = 0;
       let pendingSlider = null;
-      function commitLive(patch) {
-        // 【用户拖动滑杆 = 抢回控制权】
-        // 自演化正在推动的某个参数，只要用户亲手动了，就把它记进 userHeld，
-        // 之后 effectiveSlider 不再返回系统值，而是老老实实返回用户设置。
-        // 这样「系统演化」和「用户随时能调」两件事可以共存：
-        // 没人碰的时候天气自己走，一动手就完全听用户的。
-        if (evolveState.active) {
+      // 【by 是必填的】调参必须说明是谁在调。
+      //   重蹈的覆辙：这个函数原来只有「调什么」，没有「谁调」，于是 AI 走这条路
+      //   也会被记成用户，自演化被自己的调参关掉（见 heldBy 上面的注释）。
+      //   没有默认值 —— 默认值正是这道缺口当初能藏住的原因。
+      //   AI 走这里同样会抢走参数，这是对的：AI 调过就没收，和自己调过是一个规矩。
+      function commitLive(patch, by) {
+        if (by !== "user" && by !== "ai") {
+          console.warn("[Open Sea Shelter] commitLive 缺来源，参数被丢弃", patch);
+          return;
+        }
+        // 【谁调，谁就抢回控制权】
+        // 自演化正在推动的某个参数，只要有一方亲手动了，就记进 heldBy，
+        // 之后 effectiveSlider 不再返回系统值，而是老老实实返回设置里的值。
+        // 这样「系统演化」和「玩家 / AI 随时能调」几件事可以共存：
+        // 没人碰的时候天气自己走，一动手就完全听那一方的。
+        //
+        // 【玩家一动就退出自演化】
+        // 原来只记 heldBy：自演化还开着，但那一项归玩家 —— 结果是「半接管」：
+        // 按钮亮着、系统还在跑，可温度永远不动了，玩家也搞不清现在到底谁在管。
+        // 自演化和手动调参本来就是互斥的两个意图，拖滑杆等于说「这个我自己来」，
+        // 那就把开关关掉，语义最干净。只对玩家生效：AI 调参不该关掉玩家开的自演化。
+        if (evolveState.active && by === "user") {
+          let ownsTrack = false;
           for (const key of Object.keys(patch)) {
-            if (EVOLVE_TRACKS[key]) userHeld.add(key);
+            if (EVOLVE_TRACKS[key]) ownsTrack = true;
+          }
+          if (ownsTrack) {
+            setEvolve(false);
+            const btn = document.querySelector(".oss-evolve");
+            if (btn) btn.setAttribute("aria-pressed", "false");
           }
         }
         pendingSlider = patch;
@@ -5047,9 +5620,15 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 其他地形：往左侧展开子面板（草地）。再点一次收起。
       const terrainBtn = q(".oss-terrain-btn");
       terrainBtn.addEventListener("click", () => {
-        const next = grassPanel.hidden;
-        grassPanel.hidden = !next;
-        terrainBtn.setAttribute("aria-expanded", next ? "true" : "false");
+        // 【只认一个状态，不玩 hidden 和 display 的配合】
+        // 原来两个都写：hidden 属性 + 行内 display。expand 时只清 display 不碰 hidden，
+        // collapse 时只设 hidden 不碰 display —— 两边各管一半，中间任何一处
+        // （比如 setOpen 里的兜底写法）插一脚，状态就错位，表现为「点不动」。
+        // 现在唯一的真相是 grassPanel.style.display：
+        //   显示 = "block"，隐藏 = "none"。hidden 属性不再参与。
+        const showing = grassPanel.style.display === "block";
+        grassPanel.style.display = showing ? "none" : "block";
+        terrainBtn.setAttribute("aria-expanded", showing ? "false" : "true");
       });
       // 调试模式：在本面板内部往上展开滑块长条。再点一次收起。
       const debugBtn = q(".oss-debug-btn");
@@ -5107,7 +5686,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       }
       if (groundDensityRange) {
         groundDensityRange.addEventListener("input", () => {
-          commitLive({ groundDensity: Number(groundDensityRange.value) });
+          commitLive({ groundDensity: Number(groundDensityRange.value) }, "user");
           if (groundDensityValue) groundDensityValue.textContent = groundDensityRange.value + "%";
           pushGround();
         });
@@ -5116,7 +5695,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 花密度：和草密度一样，拖动时连续推送
       if (flowerDensityRange) {
         flowerDensityRange.addEventListener("input", () => {
-          commitLive({ flowerDensity: Number(flowerDensityRange.value) });
+          commitLive({ flowerDensity: Number(flowerDensityRange.value) }, "user");
           if (flowerDensityValue) flowerDensityValue.textContent = flowerDensityRange.value + "%";
           pushGround();
         });
@@ -5125,7 +5704,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 积雪 / 湿润：手动覆盖。拖动即推，松手停拍。
       if (snowCoverRange) {
         snowCoverRange.addEventListener("input", () => {
-          commitLive({ snowCover: Number(snowCoverRange.value) });
+          commitLive({ snowCover: Number(snowCoverRange.value) }, "user");
           if (snowCoverValue) snowCoverValue.textContent = snowCoverRange.value + "%";
           pushGround();
         });
@@ -5133,41 +5712,41 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       }
       if (wetnessRange) {
         wetnessRange.addEventListener("input", () => {
-          commitLive({ wetness: Number(wetnessRange.value) });
+          commitLive({ wetness: Number(wetnessRange.value) }, "user");
           if (wetnessValue) wetnessValue.textContent = wetnessRange.value + "%";
           pushGround();
         });
         wetnessRange.addEventListener("change", () => clearSliderFrame());
       }
-      seaRange.addEventListener("input", () => commitLive({ sea: Number(seaRange.value) }));
+      seaRange.addEventListener("input", () => commitLive({ sea: Number(seaRange.value) }, "user"));
       seaRange.addEventListener("change", () => clearSliderFrame());
       // 太阳位置滑杆与自动昼夜是互斥的两个模式，这是产品意图，不是 bug：
       //   拖滑杆 → 强制 autoCycle=false（「我要固定看夕阳」）
       //   开开关 → 引擎接管 daylight 循环（「我要看太阳自己动」）
       // 别把 input 里的 autoCycle:false 去掉，那样拖完松手太阳会立刻跑走。
-      timeRange.addEventListener("input", () => commitLive({ time: Number(timeRange.value), autoCycle: false }));
+      timeRange.addEventListener("input", () => commitLive({ time: Number(timeRange.value), autoCycle: false }, "user"));
       timeRange.addEventListener("change", () => clearSliderFrame());
       cycleBox.addEventListener("change", () => commit({ autoCycle: cycleBox.checked }));
-      glassRange.addEventListener("input", () => commitLive({ glass: Number(glassRange.value) }));
+      glassRange.addEventListener("input", () => commitLive({ glass: Number(glassRange.value) }, "user"));
       glassRange.addEventListener("change", () => clearSliderFrame());
       if (timeScaleRange) {
-        timeScaleRange.addEventListener("input", () => commitLive({ timeScale: Number(timeScaleRange.value) }));
+        timeScaleRange.addEventListener("input", () => commitLive({ timeScale: Number(timeScaleRange.value) }, "user"));
         timeScaleRange.addEventListener("change", () => clearSliderFrame());
       }
       lightningBox.addEventListener("click", () => commit({ lightning: lightningBox.getAttribute("aria-pressed") !== "true" }));
       if (lightningFreqRange) {
-        lightningFreqRange.addEventListener("input", () => commitLive({ lightningFreq: Number(lightningFreqRange.value) }));
+        lightningFreqRange.addEventListener("input", () => commitLive({ lightningFreq: Number(lightningFreqRange.value) }, "user"));
         lightningFreqRange.addEventListener("change", () => clearSliderFrame());
       }
       if (lightningCountRange) {
-        lightningCountRange.addEventListener("input", () => commitLive({ lightningCount: Number(lightningCountRange.value) }));
+        lightningCountRange.addEventListener("input", () => commitLive({ lightningCount: Number(lightningCountRange.value) }, "user"));
         lightningCountRange.addEventListener("change", () => clearSliderFrame());
       }
       // ---- 沙盒三条规则滑杆 ----
       // 温度：改的是驱动层的目标温度（驱动层向它松弛，不会瞬间跳变）
       if (tempRange) {
         tempRange.addEventListener("input", () => {
-          commitLive({ tempPos: Number(tempRange.value) });
+          commitLive({ tempPos: Number(tempRange.value) }, "user");
           // 温度一改就重算一次天气，否则积雪/积水要等最多 2 秒才响应
           refreshWeatherNow();
         });
@@ -5176,7 +5755,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 湿度：改的是水汽目标值。到饱和才下雨 —— 这是硬规则。
       if (humidRange) {
         humidRange.addEventListener("input", () => {
-          commitLive({ humidPos: Number(humidRange.value) });
+          commitLive({ humidPos: Number(humidRange.value) }, "user");
           // 湿度一改就重算，否则「拉到下雨」也要等 2 秒
           refreshWeatherNow();
         });
@@ -5222,6 +5801,23 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       startDrive();
       driveSignal("ui", { step: "drive_started", grid: gridN, terrain: driveTerrain });
 
+      // ---- 大肥鱼启动 ----
+      // 等引擎就绪再开始：纹理入口 __ossPetTexture 是引擎脚本里定义的，
+      // 脚本没加载前调用会被静默吞掉，鱼会一直停在「没纹理」状态。
+      // 轮询只在 petEntity.boot 里做一处 —— 这里只交出「就绪后要做什么」。
+      petEntity.boot(() => petScheduler.start());
+
+      // ---- 主体模块开关（试验阶段）----
+      // 关掉：停止产帧、清掉引擎里的纹理，Pass 什么都不画。
+      // 不做销毁重建 —— 重建要重新等引擎、重新加载图，切一下会闪。
+      const petOnBox = q("#oss-pet-on");
+      if (petOnBox) {
+        petOnBox.addEventListener("change", () => {
+          const on = petOnBox.checked;
+          try { petEntity.setActive(on); } catch (error) { /* 鱼主体没起来 */ }
+        });
+      }
+
       win.__openSeaShelter = {
         get settings() { return readSettings(); },
         set: (patch) => commit(patch),
@@ -5247,6 +5843,10 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         win.removeEventListener("pagehide", onPageHide);
         if (typeof offTheme === "function") offTheme();
         engine.dispose();
+        // 云主体自己管着自己的 rAF 和 resize 监听，必须单独收 ——
+        // 它的 canvas 也在 pane 里，pane.remove() 之后 rAF 还在跑就白烧 CPU。
+        try { petEntity.dispose(); } catch (error) { /* 同上 */ }
+        try { petScheduler.dispose(); } catch (error) { /* 同上 */ }
         clearGlass();
         fab.remove();
         panel.remove();
@@ -5256,6 +5856,8 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       }, "dsh-weather-sandbox: window, panel and glass");
       return () => {
         stopDrive();
+        try { petEntity.dispose(); } catch (error) { /* 同上 */ }
+        try { petScheduler.dispose(); } catch (error) { /* 同上 */ }
         for (const node of [fab, panel, pane]) if (node.parentNode) node.parentNode.removeChild(node);
         if (uiStyle.parentNode) uiStyle.parentNode.removeChild(uiStyle);
         clearGlass();

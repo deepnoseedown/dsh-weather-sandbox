@@ -2,7 +2,7 @@
     "name":  "dsh-weather-sandbox",
     "displayName":  "天气演化沙盒",
     "version":  "1.0.0",
-    "description":  "天气演化沙盒：一片会自己变天气的海。太阳会升落，云会飘会散，风从气压来，草跟着风一片片伏下去。下雨、下雪、积水、融雪，全自动循环。零依赖。",
+    "description":  "天气演化沙盒：一片会自己变天气的海。太阳会升落，云会飘会散，风从气压来，草跟着风一片片伏下去。下雨、下雪、积水、融雪，全自动循环。草地里还住着一条会自己走走停停、看得见天气变化的大肥鱼。零依赖。",
     "type":  "module",
     "main":  "index.js",
     "exports":  {
@@ -26,7 +26,9 @@
                   "icon.svg",
                   "README.md",
                   "CREDITS.md",
-                  "LICENSE"
+                  "LICENSE",
+                  "HANDOFF.md",
+                  "PET-INTEGRATION.md"
               ],
     "dsh":  {
                 "bundle":  {
