@@ -3352,8 +3352,17 @@ function main() {
 
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2) * renderScale
-    W = Math.max(1, Math.round(window.innerWidth * dpr))
-    H = Math.max(1, Math.round(window.innerHeight * dpr))
+    // 【尺寸没变就直接返回】这是「空闲时屏幕间歇性闪黑」的根因之一。
+    // 原来无条件执行 canvas.width = / canvas.height = —— 给 canvas 赋这两个值
+    // 会立刻清空整个绘图表面，紧接着 allocRT() 又重建所有帧缓冲。
+    // 浏览器在空闲时可能因为滚动条、DPI 回弹、壳层重排等原因反复触发 resize
+    // （哪怕尺寸只差 1px），于是每隔一阵就清一次画布 → 一帧黑。
+    // 加了这个判断，真 resize 照常工作，假触发直接跳过。
+    const nw = Math.max(1, Math.round(window.innerWidth * dpr))
+    const nh = Math.max(1, Math.round(window.innerHeight * dpr))
+    if (nw === W && nh === H) return
+    W = nw
+    H = nh
     canvas.width = W
     canvas.height = H
     allocRT()
@@ -4786,6 +4795,90 @@ function main() {
     // 世界尺寸不随距离变，只是它在屏幕上占的比例变。
     const bodyHalf = 1.1
     return Math.max(0.4, view - bodyHalf - 0.4)
+  }
+
+  // 角色头顶在屏幕上的像素坐标。给 DOM 用（梦境面板要浮在鱼头上）。
+  // 全部走已有的只读接口取值，不直接读 createPetPass 内部的 PET_POS / CAM_TO_PET
+  // （那两个是那个函数作用域里的 const，外面拿不到）。
+  // 与 petPass 绘制里「世界坐标 → 投影」用的是同一套矩阵和同一套换算：
+  //   世界 x = petParams.x（横向偏移）
+  //   世界 z = 8.5 - (dist - 8.5)，dist 由 __ossPetPos 给出
+  //   worldY = 地形高度 + 0.05 + lift
+  window.__ossPetScreen = (lift) => {
+    if (!lastCam) return null
+    const pos = petParams ? { x: petParams.x, z: petParams.z } : null
+    if (!pos) return null
+    const PET_BASE_Z = 8.5, PET_BASE_DIST = 8.5, PET_Y = 0.05
+    const wx = pos.x
+    const wz = PET_BASE_Z - (pos.z - PET_BASE_DIST)
+    const wy = petTerrainHeight(wx, wz) + PET_Y + (Number.isFinite(lift) ? lift : 1.6)
+    const m = lastCam.viewProj
+    const cx = m[0] * wx + m[4] * wy + m[8] * wz + m[12]
+    const cy = m[1] * wx + m[5] * wy + m[9] * wz + m[13]
+    const cw = m[3] * wx + m[7] * wy + m[11] * wz + m[15]
+    if (!(cw > 0.001)) return null
+    // viewProj 输出的是 NDC（-1..1），换算成 CSS 像素。
+    return {
+      x: ((cx / cw) * 0.5 + 0.5) * (window.innerWidth || 0),
+      y: (1 - ((cy / cw) * 0.5 + 0.5)) * (window.innerHeight || 0),
+    }
+  }
+
+  // 屏幕像素 → 地面世界坐标。壁纸模式下点地面让鱼走过去要用它。
+  //
+  // 做法：把屏幕点还原成 NDC，用逆 viewProj 反投影出射线的两个点（近平面 / 远平面），
+  // 求这条射线与 y = 地面高度 的交点。地面不是平的（有地形起伏），
+  // 所以用「先按平均高度求交、再用该点真实地形高度迭代两次」逼近 ——
+  // 起伏只有 ±1 米，两次就够，比精确求交便宜得多。
+  //
+  // 返回 { x, z }（世界坐标）。点在天空上（射线向上）时返回 null。
+  window.__ossScreenToGround = (sx, sy) => {
+    if (!lastCam) return null
+    const W = window.innerWidth || 1, H = window.innerHeight || 1
+    const ndcX = (sx / W) * 2 - 1
+    const ndcY = 1 - (sy / H) * 2
+    const inv = mat4.invert(lastCam.viewProj)
+    if (!inv) return null
+    // NDC 上的两个点：z = -1（近）与 z = 1（远）
+    const unproject = (z) => {
+      const x = ndcX, y = ndcY
+      const cx = inv[0] * x + inv[4] * y + inv[8] * z + inv[12]
+      const cy = inv[1] * x + inv[5] * y + inv[9] * z + inv[13]
+      const cz = inv[2] * x + inv[6] * y + inv[10] * z + inv[14]
+      const cw = inv[3] * x + inv[7] * y + inv[11] * z + inv[15]
+      if (!(Math.abs(cw) > 1e-6)) return null
+      return [cx / cw, cy / cw, cz / cw]
+    }
+    const a = unproject(-1), b = unproject(1)
+    if (!a || !b) return null
+    const dy = b[1] - a[1]
+    if (!(Math.abs(dy) > 1e-6)) return null
+    // 先按「地形平均高度 2.2 米」求交，再用该点真实高度修正两次
+    let groundY = 2.2
+    let px = 0, pz = 0
+    for (let i = 0; i < 3; i += 1) {
+      const t = (groundY - a[1]) / dy
+      if (!(t > 0)) return null          // 射线朝上，打不到地面
+      px = a[0] + (b[0] - a[0]) * t
+      pz = a[2] + (b[2] - a[2]) * t
+      groundY = petTerrainHeight(px, pz)
+    }
+    return { x: px, z: pz }
+  }
+
+  // 世界坐标 → 屏幕像素。给 DOM 用（木牌要钉在向日葵脚下）。
+  // 和角色那套用的是同一个 viewProj，所以和 3D 场景严丝合缝。
+  window.__ossWorldToScreen = (wx, wy, wz) => {
+    if (!lastCam) return null
+    const m = lastCam.viewProj
+    const cx = m[0] * wx + m[4] * wy + m[8] * wz + m[12]
+    const cy = m[1] * wx + m[5] * wy + m[9] * wz + m[13]
+    const cw = m[3] * wx + m[7] * wy + m[11] * wz + m[15]
+    if (!(cw > 0.001)) return null
+    return {
+      x: ((cx / cw) * 0.5 + 0.5) * (window.innerWidth || 0),
+      y: (1 - ((cy / cw) * 0.5 + 0.5)) * (window.innerHeight || 0),
+    }
   }
 
   // 时间流速倍率（0.1 ~ 10）。

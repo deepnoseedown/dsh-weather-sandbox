@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
     // 版本号同时是引擎脚本的缓存键（ocean-engine.js?v=VERSION）。
     // 每次改 static/ocean-engine.js 都必须把这里加一，否则浏览器会拿旧引擎，
     // 表现为「改了代码但页面没变化」——闪电不闪、隐藏模式不生效都是这个原因。
-    const VERSION = "1.164.0";
+    const VERSION = "1.210.0";
     const ASSET_BASE = "/dsh-weather-sandbox/";
     const STORE_KEY = "dsh-weather-sandbox/v1";
 
@@ -159,8 +159,8 @@ window.__ModuleLoader__.load({
       // 45 在风速默认 100% 时 seaValue≈1.17，波峰已经偏大、看着有点吓人。
       // 28 对应 seaValue≈0.85，是「有涌动但不吓人」的起步。
       // 滑杆上限保持 100 不动 —— 喜欢大浪的用户自己拉上去就是。
-      sea: 28,
-      time: 55,
+      sea: 15,
+      time: 36,
       autoCycle: true,
       // 时间流逝：滑杆 0..100，统一控制所有自走动画的速度（太阳月亮星空、海浪、云、雨雪）。
       // 50 = 1.0x 正常速度。低端慢放、高端快进，用来快速验证调整效果。
@@ -194,7 +194,7 @@ window.__ModuleLoader__.load({
       cloudAuto: true,
       // 云面板六项 + 星星亮度：全部走 SETTING_SCHEMA → v1 存储，重启不丢。
       cloudEnabled: true,
-      cloudAmount: 150,
+      cloudAmount: 40,
       cloudDensity: 0,
       cloudUnite: 0,
       cloudOpacity: 100,
@@ -620,37 +620,21 @@ window.__ModuleLoader__.load({
     // 「设为默认」：把当前设置整份冻结成基准。
     // 同时写回 STORE_KEY，保证两者一致：不然 STORE_KEY 还停在冻结前的旧值，
     // 下一次一拖滑杆，writeSettings 就会拿那份旧值当底去合并。
-    function saveUserDefaults() {
-      const snapshot = readSettings();
+    // snapshot 可选：不传就是「把当前设置冻结成基准」；
+    // 传了就是「把指定的一份冻结成基准」（出厂设置也能用它设为启动默认）。
+    function saveUserDefaults(snapshot) {
+      const snap = normalize(snapshot || readSettings());
       try {
-        window.localStorage.setItem(USER_DEFAULTS_KEY, JSON.stringify(snapshot));
-        window.localStorage.setItem(STORE_KEY, JSON.stringify(snapshot));
+        window.localStorage.setItem(USER_DEFAULTS_KEY, JSON.stringify(snap));
+        window.localStorage.setItem(STORE_KEY, JSON.stringify(snap));
       } catch (error) { /* 存不进去就只在本次会话生效，下面的返回值仍然可用 */ }
-      return snapshot;
+      return snap;
     }
 
     // 「恢复默认」要回到的那一份：用户冻结过就用冻结的，没冻结过才用出厂 DEFAULTS。
     function readUserDefaults() {
       const stored = readDefaultsRaw();
       return stored ? normalize(stored) : normalize(DEFAULTS);
-    }
-
-    // 只把「指定的几个键」写进冻结默认值，其余保持原样。
-    // 草地子面板的「设为默认」用它 —— 不然用户以为只存了草地，实际上整份都存了。
-    function saveDefaultsPartial(keys) {
-      const snapshot = readSettings();
-      const prev = (() => {
-        try {
-          const raw = window.localStorage.getItem(USER_DEFAULTS_KEY);
-          return raw ? JSON.parse(raw) : null;
-        } catch (error) { return null; }
-      })() || {};
-      const next = { ...prev };
-      for (const k of keys) next[k] = snapshot[k];
-      try {
-        window.localStorage.setItem(USER_DEFAULTS_KEY, JSON.stringify(next));
-      } catch (error) { /* 存不进去就只在本次会话内有效 */ }
-      return next;
     }
 
     // ------------------------------------------------------------ glass sheet
@@ -944,9 +928,11 @@ body[data-ds-dark-theme] @@PN@@ .oss-section-title { color: #e8b64a; }
 @@PN@@ .oss-foot-actions { display: inline-flex; align-items: center; gap: 12px; }
 @@PN@@ .oss-save {
   font: inherit; font-size: 10.5px; line-height: 1; padding: 3px 0; border: 0; background: transparent;
-  color: var(--dsw-alias-label-tertiary, #66788b); cursor: pointer; text-decoration: underline;
+  /* 「设为默认」标成金色、加粗、去掉下划线 —— 两个大面板 + 一个小面板底部都有这一个，
+     它是这三个面板里唯一需要用户主动按的动作，用颜色把它从「恢复默认」里区分开。 */
+  color: #c9922a; cursor: pointer; text-decoration: none; font-weight: 600;
 }
-@@PN@@ .oss-save:hover { color: var(--dsw-alias-label-primary, #0f1115); }
+@@PN@@ .oss-save:hover { color: #e8b64a; }
 /* 保存成功时按钮短暂变一下，给个「已经存住了」的确认 */
 @@PN@@ .oss-save.is-saved { color: var(--dsw-alias-brand-primary, #1aa39b); text-decoration: none; font-weight: 600; }
 
@@ -1116,6 +1102,84 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
 @media (prefers-reduced-motion: reduce) {
   #${IDS.fab} { transition: none; }
   #${IDS.weather} .oss-flash[data-flashing="true"] { animation: none; }
+}
+
+/* ---- 梦境面板 ----
+   鱼睡着时浮在它头顶的一小块控制面板。
+   纯透明背景 + 一圈柔光边框：不挡住后面的草地，但边界清楚。
+   定位由 JS 按「鱼头顶的世界坐标投影到屏幕」给出，这里只管外观和进出场。 */
+.oss-dream {
+  position: fixed; z-index: 2147480060;
+  width: 148px; padding: 10px 12px 11px;
+  border-radius: 14px;
+  /* 背景几乎全透明，只留一层极淡的冷白，让文字有落点又不挡景 */
+  background: rgba(255, 255, 255, .055);
+  border: 1px solid rgba(255, 255, 255, .28);
+  /* 双层光圈：内圈细、外圈散。这是「光晕边框」的全部实现 */
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, .12) inset,
+    0 0 18px rgba(200, 230, 255, .30),
+    0 0 46px rgba(150, 200, 255, .16);
+  -webkit-backdrop-filter: blur(3px) saturate(1.1);
+  backdrop-filter: blur(3px) saturate(1.1);
+  color: rgba(255, 255, 255, .92);
+  font-size: 11px; line-height: 1.6;
+  pointer-events: none;
+  opacity: 0; transform: translate(-50%, -100%) scale(.94);
+  transition: opacity 320ms ease, transform 320ms cubic-bezier(.2, .9, .3, 1);
+}
+.oss-dream.is-on {
+  opacity: 1; transform: translate(-50%, -100%) scale(1);
+  /* 玩家不能操作这块面板 —— 它是「鱼在做梦」的展示，手指才是唯一在动的手。
+     允许 pointer-events 的话，玩家能直接拖滑杆，那就不是梦在操控了。 */
+  pointer-events: none;
+}
+.oss-dream-title {
+  margin-bottom: 6px; text-align: center;
+  font-size: 10px; letter-spacing: .18em;
+  color: rgba(255, 255, 255, .55);
+}
+.oss-dream-row { display: grid; grid-template-columns: 30px 1fr; align-items: center; gap: 8px; }
+.oss-dream-row > span { color: rgba(255, 255, 255, .70); }
+/* 滑杆：透明轨道 + 白色圆点，和整体一致，不引入第二种视觉语言 */
+.oss-dream input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 14px; background: transparent; cursor: default;
+  pointer-events: none;
+}
+.oss-dream input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px; border-radius: 2px;
+  background: rgba(255, 255, 255, .22);
+  box-shadow: 0 0 8px rgba(200, 230, 255, .25);
+}
+.oss-dream input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 10px; height: 10px; margin-top: -4px; border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 8px rgba(200, 230, 255, .85), 0 0 16px rgba(150, 200, 255, .45);
+}
+.oss-dream input[type="range"]::-moz-range-track {
+  height: 2px; border-radius: 2px; background: rgba(255, 255, 255, .22);
+}
+.oss-dream input[type="range"]::-moz-range-thumb {
+  width: 10px; height: 10px; border: 0; border-radius: 999px; background: #fff;
+  box-shadow: 0 0 8px rgba(200, 230, 255, .85);
+}
+/* 梦游的手指：一个很小的白点，带一圈呼吸光。
+   位置由 JS 按滑杆的实际盒子算出来，所以用 transform 而不是 left/top。 */
+.oss-dream-hand {
+  position: absolute; left: 0; top: 0;
+  width: 9px; height: 9px; margin: -4.5px 0 0 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .95);
+  box-shadow: 0 0 10px rgba(210, 235, 255, .95), 0 0 22px rgba(150, 200, 255, .55);
+  opacity: 0; pointer-events: none;
+  transition: opacity 420ms ease, transform 60ms linear;
+}
+.oss-dream-hand.is-visible { opacity: .92; }
+@media (prefers-reduced-motion: reduce) {
+  .oss-dream { transition: none; }
+  .oss-dream-hand { transition: opacity 200ms ease; }
 }`;
       return css.replace(/@@PN@@/g, "#" + IDS.panel);
     }
@@ -2424,7 +2488,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         "启用海洋与玻璃", "波浪大小", "天体位置", "自动昼夜", "时间流逝",
         "显示海面",
         "玻璃不透明度", "温度", "湿度", "雾量",
-        "纯壁纸模式", "纯自演化", "< 0°C 下雪 · > 0°C 下雨", "未饱和", "还差", "雨", "雪", "已饱和",
+        "壁纸与交互", "纯自演化", "< 0°C 下雪 · > 0°C 下雨", "未饱和", "还差", "雨", "雪", "已饱和",
         "闪电", "闪电频率", "闪电数量",
         "闪电只在雨里出现",
         "v", "恢复默认", "设为默认",
@@ -2438,7 +2502,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         "Ocean and glass", "Sea state", "Celestial position", "Automatic day cycle", "Time flow",
         "Show sea",
         "Glass opacity", "Temperature", "Humidity", "Fog",
-        "Wallpaper mode", "Auto evolve", "< 0°C snow · > 0°C rain", "Not saturated", "need", "Rain", "Snow", "Saturated",
+        "Wallpaper & play", "Auto evolve", "< 0°C snow · > 0°C rain", "Not saturated", "need", "Rain", "Snow", "Saturated",
         "Lightning", "Strike rate", "Bolts per strike",
         "Lightning only appears in rain",
         "v", "Reset to saved", "Set as default",
@@ -2591,6 +2655,11 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       function play(name, done, opts) {
         if (dead || !name) return;
         const looped = !!(opts && opts.loop);
+        // hold：播完停在最后一帧，什么都不做。
+        // 「转过去看风景」要的就是这个 —— 转身那 0.5 秒播完就冻在背面，
+        // 不循环（循环会一直转身）、也不回立绘（那会转回来）。
+        // 什么时候离开由调用方自己定（调度器挂一个 setTimeout 到点再 next）。
+        const holdFrame = !!(opts && opts.hold);
         video.onended = () => {
           video.onended = null;
           if (dead) return;
@@ -2600,6 +2669,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
             video.play().then(() => syncRate()).catch(() => {});
             return;
           }
+          if (holdFrame) return;      // 停在最后那一帧，画面不动
           if (typeof done === "function") done();
           else clear();
         };
@@ -2642,7 +2712,6 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       return {
         boot,
         play,
-        stop: clear,
         // 朝向：flip = 1 面朝左（side.png 原样），-1 面朝右
         face(dir) {
           if (typeof window.__ossPetSet === "function") window.__ossPetSet({ flip: dir < 0 ? -1 : 1 });
@@ -2687,25 +2756,10 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       };
     }
 
-    // ======================================================================
-    //  大肥鱼的行为调度 —— 单队列，一段接一段
-    //
-    //  为什么是一个队列而不是多个定时器：
-    //    素材每段 10 秒、同一时刻只能播一段。多个定时器各自到点就喊，
-    //    抢输的那个被 play() 的守卫吞掉 —— 玩家看到的几乎只有先到的那个。
-    //    一个队列：播完一段 → 抽下一段 → 立刻播。永远有事做，不抢位。
-    //
-    //  抽签分两层：先抽「组」，再抽组内动作。
-    //    平铺 50 个动作一起抽的话，9 个吃的会占掉近两成，看起来像在杂耍。
-    //    分组之后「走路占 30%、吃占 5%」，比例才是可控的。
-    //
-    //  有些动作天然要待久一点（睡觉、撸猫、吹笛子），不按一刀切的 10 秒：
-    //    表里写了 hold 的，播一遍之后接着循环，循环到时间才收。
-    // ======================================================================
-    function createPetScheduler(pet, win) {
-      // 对外坐标 z 一律是「离相机的米数」，不是世界 z（引擎那一侧唯一一次换算）。
-      //   NEAR_Z 是「靠近镜头」那一档的下限。原来 3.0 —— 但 2.8~3 米处鱼已经
-      //   大到只剩半个头在画面里，身体全在屏幕外。现在整体后撤 1~2 米。
+    // 大肥鱼的行为调度：单队列，播完一段抽下一段。
+    // 抽签分两层（先抽组再抽组内）—— 平铺 50 个动作一起抽会变成杂耍。
+    // onDream(show)：睡觉时的梦境面板回调。只有玩家点「睡觉与做梦」触发时才为 true。
+    function createPetScheduler(pet, win, onDream) {
       const NEAR_Z = 4.8;
       const CLIP_SEC = 10.04;
       // 一次位移最多走多远（米）。原来远档能一下跳到 26~41 米，等于瞬移，
@@ -2717,15 +2771,21 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // hold 循环时长（秒，[min,max]）。没有 = 播一遍就切
       // walk 是否要配位移
       const GROUPS = {
-        walk: { weight: 30, clips: ["漂浮踏步", "螃蟹走路", "左转奔跑"] },
+        walk: { weight: 26, clips: ["漂浮踏步", "螃蟹走路", "左转奔跑"] },
         idle: { weight: 20, clips: ["东张西望", "哈欠连天", "超大伸懒腰"] },
-        daily: { weight: 10, clips: ["晨间刷牙", "照镜子", "悠闲哼歌", "打瞌睡被惊醒"] },
-        play: { weight: 10, clips: ["撸猫", "原地专心玩魔方", "下五子棋", "三球抛接", "扑克魔术", "荡秋千"] },
+        // 背对看风景：单独一组，权重 8。它不在 idle 里，因为 idle 那三个都只播一遍，
+        // 而这个要靠 HOLD 循环 40~90 秒才成立。
+        backview: { weight: 8, clips: ["背对看风景"] },
+        daily: { weight: 7, clips: ["照镜子", "悠闲哼歌", "打瞌睡被惊醒"] },
+        play: { weight: 16, clips: ["撸猫", "原地专心玩魔方", "下五子棋", "三球抛接", "扑克魔术", "荡秋千"] },
         season: { weight: 8, clips: ["被落叶淹没", "堆雪人", "摇扇纳凉", "玩水枪"] },
         talent: { weight: 8, clips: ["吹笛子", "小提琴演奏", "轻快摇摆舞", "可爱宅舞", "优雅女仆舞"] },
         eat: { weight: 5, clips: ["期待开饭", "吃饭·碗饭", "吃饭团", "吃早餐", "吃午餐", "吃晚餐", "吃西瓜", "大口吃零食", "偷吃零食被抓住"] },
         mood: { weight: 5, clips: ["点击回应-害羞惊讶", "深度思考碎碎念", "用鲸鱼尾巴拍打地面"] },
         rare: { weight: 3, clips: ["蝴蝶蜜蜂环绕头顶开花", "原地重力下蹲压缩"] },
+        // 睡觉可以随机抽到（它自己的作息），也可以由玩家点「睡觉与做梦」触发。
+        // 区别在于来源：用户点的才弹头顶那个梦境面板 —— 随机睡时弹面板会动用户界面，不可控。
+        sleep: { weight: 5, clips: ["睡觉-开始"] },
       };
 
       // 需要循环播放、待久一点的动作。没列在这里的一律播一遍。
@@ -2735,19 +2795,31 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         "小提琴演奏": [20, 30],
         "悠闲哼歌": [30, 60],
         "原地专心玩魔方": [15, 35],
+        // 转过去看风景要「看很久」：截出来的片子只有 1 秒转身，靠循环待够 40~90 秒。
+        "背对看风景": [40, 90],
       };
 
       const GROUP_KEYS = Object.keys(GROUPS);
       const GROUP_TOTAL = GROUP_KEYS.reduce((s, k) => s + GROUPS[k].weight, 0);
+
+      // 壁纸模式下点鱼本身会播的回应。五个都是素材库自带的「被摸」反应。
+      const CLICK_REACTS = [
+        "点击回应-害羞惊讶",
+        "点击回应-开心跃动",
+        "点击回应-挠痒咯咯笑",
+        "点击回应-元气挥手",
+        "点击回应-傲娇生气",
+      ];
 
       let lastClip = "";
       let facing = -1;
       let disposed = false;
       let queueTimer = 0;
       let busy = false;          // 正在跑一段，期间的插队要排队
-      // 睡着的时候不理天气。
-      // 天气反应（reactWeather）会 clearTimeout(queueTimer) 再播自己的动作，
-      // 而睡眠计时正是挂在 queueTimer 上 —— 不挡的话，天一变它就醒，看起来像「只睡几秒」。
+      // 这次睡觉是谁发起的：true = 玩家点了按钮，false = 队列随机抽到。
+      // 只有玩家点的那种才弹头顶的梦境面板 —— 随机睡的时候弹面板等于动用户界面。
+      let sleepByUser = false;
+      // 睡着期间屏蔽天气反应。见 reactWeather() 里那条 clearTimeout 的说明。
       let sleeping = false;
 
       // 环境事件的冷却
@@ -2814,18 +2886,13 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         const { clip, group } = pick();
         lastClip = clip;
 
-        // 走路要配位移（引擎按 10 秒走满）。
-        // 【落点密不密，取决于「下一步离现在有多远」，不是「绝对距离多随机」】
-        // 原来每一段都从整幅画面里重新抽一个目标（远档 26~41 米），
-        // 结果每次都是大跨度瞬移，看起来像跳帧。
-        // 现在：先抽一个目标距离，再把位移量钳到 STEP_MAX 以内 ——
-        // 每段都是小步，落点自然就密了。
+        // 走路配位移。落点密不密取决于「下一步离现在多远」，不是「绝对目标多随机」——
+        // 所以先从整幅画面抽目标距离，再把单次位移钳到 STEP_MAX 以内，每段走一小步。
         if (group === "walk") {
           const r = Math.random();
           const tz = r < 0.05 ? NEAR_Z
                    : r < 0.30 ? rand(NEAR_Z, 11)
                    : rand(14, 30);
-          const dir = Math.random() < 0.5 ? -1 : 1;
           const near = Number.isFinite(pet.posZ()) ? pet.posZ() : tz;
           const z = near + Math.max(-STEP_MAX, Math.min(STEP_MAX, tz - near));
           const hw = halfWidth(z);
@@ -2833,9 +2900,9 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         }
 
         const hold = HOLD[clip];
-        // 睡觉是唯一一个「多段 + 带位移 + 会待很久」的动作，单独走一条流程。
-        // 它不进普通队列：普通队列每段播完就切，睡觉要 开始→循环 N 分钟→起来 三连。
+        // 抽到睡觉：走三连流程，来源记成「队列」（不弹梦境面板）。
         if (clip === "睡觉-开始") {
+          sleepByUser = false;
           sleepSequence();
           busy = true;
           return;
@@ -2851,6 +2918,17 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 播完一遍之后继续循环，循环到时间再收。
       // 引擎那边 loop 只影响视频是否回绕；这里用定时器控制「什么时候离开」。
       function loopThenNext(clip, seconds) {
+        // 背对看风景是特例：它只有 0.5 秒的「转过去」，循环起来就一直在转。
+        // 这段要的是转完冻住，所以走 hold，不走 loop。
+        if (clip === "背对看风景") {
+          pet.play(clip, null, { hold: true });
+          clearTimeout(queueTimer);
+          queueTimer = setTimeout(() => {
+            if (disposed) return;
+            next();
+          }, wait(seconds));
+          return;
+        }
         pet.play(clip, next, { loopAfter: true, loop: true });
         clearTimeout(queueTimer);
         queueTimer = setTimeout(() => {
@@ -2863,40 +2941,43 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 三件事按顺序排，中间每一步都要等上一段播完。
       // 位置选画面左下的中景：那里有草、不挡画面，而且离相机不远，
       // 玩家能看清它真的躺下了 —— 这就是「看着自己的宠物睡觉」。
+      // 睡觉地点：向日葵丛底下。世界 (4.3, 10.7)，固定不随机 —— 这是它的窝。
+      // 对外接口的 z 是「离相机米数」，世界 z 10.7 对应约 6.3 米。
+      const SLEEP_SPOT = { x: 4.3, z: 6.3 };
+
+      // 睡觉三连：走到窝 → 躺下 → 循环 1~3 分钟 → 起来 → 伸懒腰 → 刷牙。
+      // 走路用「漂浮踏步」配位移，不能边播「睡觉-开始」边位移（会变成躺着平移）。
       function sleepSequence() {
         if (disposed) return;
         sleeping = true;
-        // 1. 用「漂浮踏步」走过去 —— 不能一边播「睡觉-开始」一边位移。
-        //    睡觉-开始 是躺下的动作，不是走路；同时位移就会看到
-        //    「先原地躺下、再被平移过去」。
-        const tx = rand(4.0, 4.6), tz = rand(6.0, 6.6);
-        pet.moveTo(tx, tz, CLIP_SEC);
+        pet.moveTo(SLEEP_SPOT.x, SLEEP_SPOT.z, CLIP_SEC);
         pet.play("漂浮踏步", () => {
           if (disposed) return;
-          // 2. 到位后才躺下
           pet.play("睡觉-开始", () => {
             if (disposed) return;
-            // 3. 循环睡：时长走【真实时间】，不除以 ts()。
-            //    套用时间流速的话，6 倍速下 60 秒只剩 10 秒 —— 合眼就醒。
             pet.play("睡觉-循环", () => {}, { loop: true });
+            // 躺稳了才弹 —— 此时鱼已经走到窝里、位置不再变，面板定位才准。
+            if (sleepByUser && typeof onDream === "function") onDream(true);
             clearTimeout(queueTimer);
-            const sleepMs = rand(60, 180) * 1000;
+            // 睡 3~5 分钟（真实时间，不吃时间流速）
             queueTimer = setTimeout(() => {
               if (disposed) return;
-              // 4. 起来
-              // 兜底：起床动作若因任何原因播不完（onended 不触发、视频解码失败），
-              // sleeping 会永久停在 true，从此它再也不理天气。
-              // 所以先挂一个保险丝，正常情况下它会被上面的回调抢在前面清掉。
-              const fuse = setTimeout(() => { sleeping = false; next(); }, 20000);
               pet.play("睡觉-起来", () => {
                 if (disposed) return;
-                clearTimeout(fuse);
                 sleeping = false;
-                // 5. 走回中景再回队列
-                pet.moveTo(rand(-1.5, 1.5), rand(9, 14), CLIP_SEC);
-                next();
+                if (typeof onDream === "function") onDream(false);
+                // 4. 醒来伸个懒腰，再刷牙
+                pet.play("超大伸懒腰", () => {
+                  if (disposed) return;
+                  pet.play("晨间刷牙", () => {
+                    if (disposed) return;
+                    // 5. 离开窝，回中景再回队列
+                    pet.moveTo(rand(-1.5, 1.5), rand(9, 14), CLIP_SEC);
+                    next();
+                  });
+                });
               });
-            }, sleepMs);
+            }, rand(180, 300) * 1000);
           });
         });
       }
@@ -2938,7 +3019,11 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
 
       function reactWeather() {
         if (disposed) return;
-        if (sleeping) return;      // 睡着的时候不搭理天气
+        // 睡着的时候不搭理天气。
+        // 这一条是「睡了没几秒就醒」的根因：reactWeather 每 660ms 跑一次，
+        // 一旦触发就 clearTimeout(queueTimer) —— 而睡眠计时正是挂在 queueTimer 上，
+        // 于是天一变它就被叫醒，3~5 分钟的睡眠变成几秒。
+        if (sleeping) return;
         const s = sampleWeather();
         if (!s) return;
         const t = now();
@@ -2963,31 +3048,50 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       }
 
       let weatherTimer = 0;
-      let sleepTimer = 0;
-
-      // 睡觉单独定时：每 8~15 分钟想睡一次。
-      // 不走队列抽签 —— 抽签意味着「任何时候都可能突然躺下」，
-      // 定时才有「它活动久了、累了」的感觉。
-      // 到点时如果正在忙（走路/插播中）就跳过这一轮，等下一个周期。
-      function trySleep() {
-        if (disposed) return;
-        if (!busy) sleepSequence();
-        scheduleSleep();
-      }
-      function scheduleSleep() {
-        clearTimeout(sleepTimer);
-        sleepTimer = setTimeout(trySleep, wait(rand(480, 900)));
-      }
 
       return {
-        // 外部手动让它睡。面板上的「让它睡觉」按钮调这个。
-        // 和定时那一路的区别：这个是玩家点的，正在忙也打断 —— 点了就该有反应。
+        // 外部手动让它睡。面板上的「睡觉与做梦」按钮调这个。
+        // 和队列抽签的区别：这个是玩家点的，立刻打断当前这段，并且会弹出梦境面板。
         sleepNow() {
           if (disposed) return false;
           clearTimeout(queueTimer);
-          clearTimeout(sleepTimer);
+          sleepByUser = true;
           sleepSequence();
-          scheduleSleep();          // 手动睡过之后重新排下一次自动睡
+          return true;
+        },
+        // 玩家点「看风景」：立刻转过去背对镜头，站一会儿再回队列。
+        // 和自动抽到的区别只在于「立刻」，播的内容完全一样（背对看风景 + 循环）。
+        sceneryNow() {
+          if (disposed) return false;
+          clearTimeout(queueTimer);
+          lastClip = "背对看风景";
+          // 播一遍（转身那 0.5 秒）后冻在最后一帧，站住不动。
+          pet.play("背对看风景", null, { hold: true });
+          const ms = rand(30, 60) * 1000;
+          queueTimer = setTimeout(() => { if (!disposed) next(); }, ms);
+          busy = true;
+          return true;
+        },
+        // 玩家点了鱼本身（壁纸模式下）：播一个随机的「点击回应」，播完回队列。
+        // 不碰队列当前那一段的定时器之外的东西 —— 打断是对的，点了就该有反应。
+        react() {
+          if (disposed) return false;
+          const pool = CLICK_REACTS;
+          const clip = pool[(Math.random() * pool.length) | 0];
+          clearTimeout(queueTimer);
+          lastClip = clip;
+          pet.play(clip, () => { if (!disposed) next(); });
+          busy = true;
+          return true;
+        },
+        // 玩家点了地面（壁纸模式）：播走路动作。位移已经由调用方下过了。
+        // 时长按位移距离给：走近处 2.2 秒，走远处也是 2.2 秒，动作对得上就行。
+        reactWalk() {
+          if (disposed) return false;
+          clearTimeout(queueTimer);
+          lastClip = "漂浮踏步";
+          pet.play("漂浮踏步", () => { if (!disposed) next(); });
+          busy = true;
           return true;
         },
         start() {
@@ -2996,13 +3100,11 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           step();                                        // 一进场就在动，才像活的
           setTimeout(flipSide, wait(rand(12, 30)));
           weatherTimer = setInterval(reactWeather, Math.max(100, 660 / ts()));
-          scheduleSleep();
         },
         dispose() {
           disposed = true;
           clearTimeout(queueTimer);
           clearInterval(weatherTimer);
-          clearTimeout(sleepTimer);
         },
       };
     }
@@ -3039,7 +3141,11 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       (doc.body || doc.documentElement).appendChild(pane);
 
       const petEntity = createPetEntity();
-      const petScheduler = createPetScheduler(petEntity, win);
+      // onDream 要等梦境面板建好后才能接（它在下面），先用一个转发变量。
+      let dreamToggle = null;
+      const petScheduler = createPetScheduler(petEntity, win, (show) => {
+        if (typeof dreamToggle === "function") dreamToggle(show);
+      });
 
       const uiStyle = doc.createElement("style");
       uiStyle.id = IDS.ui;
@@ -3116,6 +3222,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 沉浸模式：隐藏 DSH 界面，并在屏幕正中放一个「回到界面」大按钮。
       // 没有这个按钮，用户进去就出不来 —— 快捷键不能作为唯一出口。
       let restoreBtn = null;
+      let dpadHint = null;      // 「回到界面」左边的方向键提示
       function setImmersive(next) {
         immersive = !!next;
         paintGlass(readSettings().glass);
@@ -3150,9 +3257,45 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
             restoreBtn.addEventListener("click", () => setImmersive(false));
             doc.body.appendChild(restoreBtn);
           }
+          // 「回到界面」左边一个方形方向键提示。
+          // 壁纸模式改名成「壁纸与交互」之后，玩家要知道自己能控制那条鱼 ——
+          // 一个方向键图形比一句说明直观，也不占地方。
+          if (!dpadHint) {
+            dpadHint = doc.createElement("button");
+            dpadHint.type = "button";
+            dpadHint.title = "方向键移动";
+            dpadHint.style.cssText = [
+              "position:fixed", "right:148px", "bottom:14px", "z-index:2147480099",
+              "width:30px", "height:30px", "padding:0", "border-radius:9px",
+              "display:inline-flex", "align-items:center", "justify-content:center",
+              "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 82%, transparent)",
+              "border:1px solid #d9a93c99", "color:#c9922a", "cursor:pointer",
+              "backdrop-filter:blur(10px)", "-webkit-backdrop-filter:blur(10px)",
+              "box-shadow:0 2px 12px #00000033, 0 0 0 1px #d9a93c22",
+              "transition:opacity 160ms ease, transform 160ms ease, color 160ms ease",
+            ].join(";");
+            // 标准方向键布局：上面单独一个 ↑，下面一排 ← ↓ →。
+            // 不画成「十字星」那种全面屏展开图标 —— 玩家要认的是键盘方向键。
+            dpadHint.innerHTML = [
+              '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"',
+              ' stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">',
+              // 上：一个向上箭头
+              '<path d="M12 3.2 12 8.4M9.6 5.6 12 3.2l2.4 2.4"/>',
+              // 下排三个：左、下、右
+              '<path d="M4.2 16.6 6.6 16.6M5.4 15.4 4.2 16.6l1.2 1.2"/>',
+              '<path d="M12 14.2 12 19.4M9.6 17 12 19.4l2.4-2.4"/>',
+              '<path d="M19.8 16.6 17.4 16.6M18.6 15.4 19.8 16.6l-1.2 1.2"/>',
+              '</svg>',
+            ].join("");
+            dpadHint.addEventListener("click", () => {
+              // 点它不做事，只是一个提示 —— 但它得能吃掉点击，否则会穿透到世界上去
+            });
+            doc.body.appendChild(dpadHint);
+          }
         } else if (restoreBtn) {
           restoreBtn.remove();
           restoreBtn = null;
+          if (dpadHint) { dpadHint.remove(); dpadHint = null; }
         }
       }
       function restorePageBackground() {
@@ -3198,9 +3341,6 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         };
         if (!settings.autoCycle) patch.t = settings.time;
         // 直连不需要等 oceanStarted：引擎脚本一加载完就会挂上 __ossSeaSet。
-        // 探针：确认倍率真的到了引擎那一侧。刷完页面拖「时间流逝」，看 Console。
-        console.log("[ts] client sends", patch.timeScale, "→ engine has",
-          typeof win.__ossTimeScale === "function" ? win.__ossTimeScale() : "no-api");
         if (typeof win.__ossSeaSet === "function") {
           win.__ossSeaSet(patch);
           return;
@@ -3917,11 +4057,12 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         // 这里不再占主面板空间。
         '</div>',   // 关闭 .oss-debug
         '<div class="oss-foot"><span class="oss-hint" id="oss-hint">v' + VERSION + '</span>',
-        // 左：把当前参数存成「我的默认」；右：回到最近一次保存的默认。
-        // 出厂值只在从没保存过时兜底，所以重置按钮的文案是「恢复默认」。
+        // 左：把当前参数存成一个命名配方；右：打开配方列表。
+        // 「恢复默认」已移除 —— 它背后的 USER_DEFAULTS 从没被设置过，等于没用。
+        // 恢复出厂值改成配方列表的第一项，永远在那儿。
         '<span class="oss-foot-actions">',
-        '<button type="button" class="oss-save">' + copy.saveDefault + '</button>',
-        '<button type="button" class="oss-reset">' + copy.reset + '</button>',
+        '<button type="button" class="oss-save oss-recipe-save">保存配方</button>',
+        '<button type="button" class="oss-reset oss-recipe-open">配方 ▾</button>',
         '</span></div>',
         // 纯壁纸 / 纯自演化 两个开关已移到面板顶部的四格小框里，这里不再重复。
       ].join("");
@@ -3973,16 +4114,19 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         // ---- 主体模块（试验阶段）----
         // 默认开。关掉就回到纯天气沙盒 —— 没有人看着你。
         '<div class="oss-section"><div class="oss-section-title">主体模块 <span style="opacity:.55;font-weight:400">（试验阶段）</span></div>',
-        '<div class="oss-switch"><label for="oss-pet-on">鱼主体</label>',
+        '<div class="oss-switch"><label for="oss-pet-on">世界生灵</label>',
         '<input type="checkbox" id="oss-pet-on" checked /></div>',
-        '<div class="oss-switch"><label>让它睡觉</label>',
-        '<button type="button" class="oss-save oss-pet-sleep" style="cursor:pointer">睡一觉</button></div>',
+        '<div class="oss-switch"><label></label>',
+        '<button type="button" class="oss-save oss-pet-scenery" style="cursor:pointer">看风景</button>',
+        '<button type="button" class="oss-save oss-pet-sleep" style="cursor:pointer">睡觉与做梦</button></div>',
+        '<div class="oss-switch"><label></label>',
+        '<button type="button" class="oss-save oss-pet-name" style="cursor:pointer">起个名字</button>',
+        '<button type="button" class="oss-save oss-pet-diary" style="cursor:pointer">做梦日记</button></div>',
         '</div>',
-        '<div class="oss-foot"><span class="oss-hint">' + copy.otherTerrain + '</span>',
-        '<span class="oss-foot-actions">',
-        '<button type="button" class="oss-save oss-grass-save">' + copy.saveDefault + '</button>',
-        '<button type="button" class="oss-reset oss-grass-reset">' + copy.reset + '</button>',
-        '</span></div>',
+        // 子面板不放保存按钮：配方统一在主面板底部。
+        // 之前这里有一套独立的「设为默认 / 恢复默认」，只存草地那几项，
+        // 和主面板的配方必然打架 —— 用户切配方时草地不动，看着就像「配方只生效了一半」。
+        '<div class="oss-foot"><span class="oss-hint">' + copy.otherTerrain + '</span></div>',
       ].join("");
 
       const host = doc.body || doc.documentElement;
@@ -5492,16 +5636,234 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       let statusTimer = 0;
       function updateStatus() {
         const el = q("#oss-hint");
+        tickDayCount();               // 先推进天数计数，label 才拿得到最新值
         if (!el) return;
         let head = "v" + VERSION;
         if (typeof win.__ossState === "function") {
           try {
             const s = win.__ossState();
-            head = "v" + VERSION + "  day " + Math.round(s.daylight) + (s.autoOn ? " auto" : " lock");
+            // 累计天数：每走完一轮昼夜 +1。和「昼夜相位」是两回事 ——
+            // 相位 day 55 是「现在是下午」，累计天数才是「这个世界过了多少天」。
+            head = "v" + VERSION + "  " + dayLabel();
           } catch (error) { /* 引擎没起来就只显示版本 */ }
         }
         el.textContent = head;
       }
+
+      // ---- 累计天数 ----
+      // 每走完一轮昼夜算一天。计数落盘，重启不清零。
+      // 时间流速快的时候天数涨得也快 —— 那是「游戏时间」，不是真实时间。
+      const DAY_COUNT_KEY = "dsh-weather-sandbox/dayCount";
+      const DAYS_PER_YEAR = 365;
+      function readDayCount() {
+        try {
+          const v = Number(window.localStorage.getItem(DAY_COUNT_KEY));
+          return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+        } catch (e) { return 0; }
+      }
+      let dayCount = readDayCount();
+      let lastPhase = null;          // 上一次采到的昼夜相位（0..100）
+      function tickDayCount() {
+        let phase = null;
+        try {
+          if (typeof win.__ossState === "function") {
+            const s = win.__ossState();
+            if (s && Number.isFinite(s.daylight)) phase = s.daylight;
+          }
+        } catch (e) { /* 引擎没起来 */ }
+        if (phase === null) return;
+        // 相位从 ~100 掉回 ~0 就是跨过了一天（自动昼夜才会回绕）
+        if (lastPhase !== null && lastPhase > 70 && phase < 30) {
+          dayCount += 1;
+          try { window.localStorage.setItem(DAY_COUNT_KEY, String(dayCount)); } catch (e) { /* 存不下就只在本次会话记 */ }
+        }
+        lastPhase = phase;
+      }
+      // 「1年128天」这种写法。不满一年只写天数。
+      function dayLabel() {
+        const years = Math.floor(dayCount / DAYS_PER_YEAR);
+        const days = dayCount % DAYS_PER_YEAR;
+        if (years <= 0) return "第 " + dayCount + " 天";
+        return years + " 年 " + days + " 天";
+      }
+
+      // ---- 鱼的日记 ----
+      // 它的名字。没起名之前叫「它」，起过之后所有地方都用这个名字。
+      const PET_NAME_KEY = "dsh-weather-sandbox/petName";
+      function readPetName() {
+        try { return window.localStorage.getItem(PET_NAME_KEY) || ""; } catch (e) { return ""; }
+      }
+      function writePetName(n) {
+        try {
+          if (n) window.localStorage.setItem(PET_NAME_KEY, n);
+          else window.localStorage.removeItem(PET_NAME_KEY);
+        } catch (e) { /* 存不下就只在本次会话生效 */ }
+      }
+      // 每次「睡觉与做梦」完整走完（梦里把五根滑杆都推过一遍）记一条。
+      // 最多 50 条，旧的自动丢 —— 用户未必会看，但不能无限涨。
+      const DIARY_KEY = "dsh-weather-sandbox/diary";
+      const DIARY_MAX = 50;
+      const DIARY_LABEL = { flower: "花", grass: "草", sun: "天色", sea: "海浪", humid: "湿气" };
+
+      function readDiary() {
+        try {
+          const raw = window.localStorage.getItem(DIARY_KEY);
+          if (!raw) return [];
+          const arr = JSON.parse(raw);
+          return Array.isArray(arr) ? arr : [];
+        } catch (e) { return []; }
+      }
+      function writeDiary(list) {
+        try {
+          window.localStorage.setItem(DIARY_KEY, JSON.stringify(list.slice(-DIARY_MAX)));
+          return true;
+        } catch (e) { return false; }
+      }
+      // 每种「梦里动作」有多个说法。同一种意思换着说，读起来才不像模板。
+      // 数值分档：小幅 / 中幅 / 大幅，用词也跟着变重。
+      const ACT_WORDS = {
+        flower: {
+          up: [
+            ["花开了几朵", "花开得多了一点", "花铺满了整片坡", "把花全催开了，一层压一层"],
+            ["草尖上冒了新芽", "冒出一小片新芽", "新芽窜得比草还高"],
+          ],
+          down: [
+            ["花落了", "把花收回去一些", "让花全谢了"],
+          ],
+        },
+        grass: {
+          up: [["草长高了一点", "草长得更旺", "草一直长到看不见脚"]],
+          down: [["草矮了下去", "把草压平了"]],
+        },
+        sun: {
+          up: [["天色往后推了一点", "把太阳往后挪了挪", "把整片天推到了傍晚"]],
+          down: [["天色往回拨了一点", "把太阳往前拉了一截", "把夜也拉过来了"]],
+        },
+        sea: {
+          up: [["海起了些波纹", "海翻起了浪", "海整个立了起来"]],
+          down: [["海静了下来", "海面平得像一块铜", "把海按住了，一点声都没有"]],
+        },
+        humid: {
+          up: [["空气里多了点水汽", "空气潮了起来", "空气浓得能拧出水"]],
+          down: [["空气干了一点", "把空气吹得很干"]],
+        },
+      };
+      // 变化幅度 → 用第几档说法（0 小 / 1 中 / 2 大）
+      function magnitude(diff) {
+        const a = Math.abs(diff);
+        if (a >= 55) return 2;
+        if (a >= 30) return 1;
+        return 0;
+      }
+      function pickFrom(arr) { return arr[(Math.random() * arr.length) | 0]; }
+      // 把梦里推的峰值翻译成人话。返回「每一根滑杆的句子」和强度统计。
+      function describeDream(peaks) {
+        const out = [];
+        let intensity = 0;
+        for (const k of Object.keys(DIARY_LABEL)) {
+          const d = peaks[k];
+          if (!d) continue;
+          const diff = d.peak - d.home;
+          if (Math.abs(diff) < 12) continue;
+          const pool = ACT_WORDS[k];
+          if (!pool) continue;
+          const dir = diff > 0 ? "up" : "down";
+          const bands = pool[dir];
+          if (!bands || !bands.length) continue;
+          const band = bands[Math.min(magnitude(diff), bands.length - 1)];
+          out.push(pickFrom(band));
+          intensity += 1 + magnitude(diff);
+        }
+        return { parts: out, intensity };
+      }
+      // 天气在正文里的呼应 —— 让「昨晚下雪了」和正文连起来。
+      const WEATHER_ECHO = {
+        "晴": ["醒来光很足。", "醒来天是透亮的。", "醒来日头晒在背上。"],
+        "多云": ["醒来云还在慢慢挪。", "醒来云压得不高。"],
+        "阴": ["醒来天是灰的。", "醒来云把光都吞了。"],
+        "雨": ["醒来还听见雨。", "醒来雨没停。", "醒来身上是湿的。"],
+        "雷雨": ["醒来远处还在响。", "醒来空气里有雷电留下的味道。"],
+        "雪": ["醒来雪积了厚厚一层。", "醒来脚边是雪。", "醒来天地都是白的。"],
+      };
+      // 跨年时的额外一句。只在刚过整年时出现，所以每次看到都像件事。
+      function yearLine(day) {
+        if (day <= 0) return "";
+        const y = Math.floor(day / DAYS_PER_YEAR);
+        if (y <= 0) return "";
+        const rest = day % DAYS_PER_YEAR;
+        if (rest > 3) return "";      // 只在刚跨年的头几天说
+        if (y === 1) return "这是第二个年头的开头。第一个年头怎么过的，记不太清了。";
+        if (y === 2) return "又过了一整年。这是第三年。";
+        return "第" + (y + 1) + "个年头开始了。已经不太去数了。";
+      }
+      function addDiaryEntry(peaks) {
+        const dd = describeDream(peaks || {});
+        const acts = dd.parts;
+        if (!acts.length) return false;
+
+        const weather = currentWeatherWord();
+        const lines = [];
+
+        // ① 梦的主体。一句里放不下就拆成两句，别堆成长句。
+        if (acts.length === 1) {
+          lines.push("梦里" + acts[0] + "。");
+        } else if (acts.length === 2) {
+          lines.push("梦里" + acts[0] + "，又" + acts[1] + "。");
+        } else {
+          lines.push("梦里先是" + acts[0] + "，又" + acts[1] + "。");
+          lines.push("后来" + acts[2] + "。");
+        }
+
+        // ② 强度决定梦留下的余味
+        if (dd.intensity >= 7) {
+          lines.push(pickFrom(["醒来得花了一阵才认得出这是哪。", "醒来手还在动，像没离开过。", "醒来觉得梦比醒着更长。"]));
+        } else if (dd.intensity >= 4) {
+          lines.push(pickFrom(["醒来还记得那个样子。", "醒来愣了一下才回过神。"]));
+        } else {
+          lines.push(pickFrom(["醒来做的东西没留下什么痕迹。", "醒来不太确定是梦还是走神。"]));
+        }
+
+        // ③ 天气呼应：只有读到天气时才写，读不到就跳过（不编）
+        const echo = WEATHER_ECHO[weather];
+        if (echo) lines.push(pickFrom(echo));
+
+        // ④ 跨年那句
+        const yl = yearLine(dayCount);
+        if (yl) lines.push(yl);
+
+        const entry = {
+          day: dayCount,
+          time: Date.now(),
+          weather,
+          text: lines.join(""),
+        };
+        const list = readDiary();
+        list.push(entry);
+        return writeDiary(list);
+      }
+
+      // 睡觉那一刻的天气，从驱动层的实际读数推出来 —— 不看用户滑杆，看天真的样子。
+      function currentWeatherWord() {
+        let w = null;
+        try {
+          if (typeof win.__openSeaShelter === "object" && win.__openSeaShelter) {
+            w = win.__openSeaShelter.drive();
+          }
+        } catch (e) { w = null; }
+        if (!w || !w.ready) return "";
+        const precip = w.vaporPrecip || 0;
+        const tempC = Number.isFinite(w.centerC) ? w.centerC : 20;
+        if (precip > 0.01) {
+          if (tempC < 0) return "雪";
+          if ((w.updraft || 0) > 0.15) return "雷雨";
+          return "雨";
+        }
+        const humid = w.humidityPct || 0;
+        if (humid > 85) return "阴";
+        if (humid > 70) return "多云";
+        return "晴";
+      }
+
       function setOpen(next) {
         open = !!next;
         panel.hidden = !open;
@@ -5560,6 +5922,86 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         paint();
         for (const listener of listeners) listener(readSettings());
       }
+
+      // ---- 天气配方 ----
+      // 只存「天气参数」，不存主体设置 —— 鱼的状态不属于天气。
+      // 列表第一项永远是「出厂设置」（来自 DEFAULTS），删不掉。
+      const RECIPES_KEY = "dsh-weather-sandbox/recipes";
+      // 这些字段组成一份配方。全部是 SETTING_SCHEMA 里有的键。
+      const RECIPE_KEYS = [
+        "seaVisible", "sea", "time", "autoCycle", "timeScale", "glass",
+        "tempPos", "humidPos", "fogPos", "lightning", "lightningFreq", "lightningCount",
+        "cloudEnabled", "cloudAuto", "cloudAmount", "cloudDensity", "cloudUnite",
+        "cloudOpacity", "cloudWind", "starBright",
+        "sunBright", "moonBright", "glow", "radius",
+        // 地形也算天气的一部分：「雪后草原」这种配方没草就不成立。
+        // 草地子面板那个独立的「设为默认」已经删掉了 —— 两套存储并存必然打架，
+        // 一个配方就该是「整片世界长什么样」的完整快照。
+        "groundVisible", "groundDensity", "flowerDensity", "snowCover", "wetness",
+      ];
+
+      function readRecipes() {
+        try {
+          const raw = window.localStorage.getItem(RECIPES_KEY);
+          if (!raw) return [];
+          const arr = JSON.parse(raw);
+          if (!Array.isArray(arr)) return [];
+          // 只保留有名字、有参数的条目；旧格式坏了就当没有
+          return arr.filter((r) => r && typeof r.name === "string" && r.params && typeof r.params === "object");
+        } catch (error) {
+          return [];
+        }
+      }
+      function writeRecipes(list) {
+        try {
+          window.localStorage.setItem(RECIPES_KEY, JSON.stringify(list));
+          return true;
+        } catch (error) {
+          return false;
+        }
+      }
+      function snapshotRecipe() {
+        const s = readSettings();
+        const out = {};
+        for (const k of RECIPE_KEYS) out[k] = s[k];
+        return out;
+      }
+      // 保存一个命名配方。同名就覆盖（用户想改那个名字）。
+      function saveRecipe(name) {
+        const trimmed = String(name || "").trim();
+        if (!trimmed) return false;
+        const list = readRecipes();
+        const item = { id: String(Date.now()), name: trimmed.slice(0, 24), params: snapshotRecipe() };
+        const idx = list.findIndex((r) => r.name === item.name);
+        if (idx >= 0) list[idx] = item;
+        else list.push(item);
+        return writeRecipes(list);
+      }
+      function deleteRecipe(id) {
+        const list = readRecipes().filter((r) => r.id !== id);
+        return writeRecipes(list);
+      }
+      // 应用一个配方：把参数写回设置。用 commit 而不是 commitLive ——
+      // 后者会记 heldBy，等于「用户接管」，把自演化永久挡住。
+      function applyRecipe(params) {
+        const patch = {};
+        for (const k of RECIPE_KEYS) {
+          if (params[k] !== undefined) patch[k] = params[k];
+        }
+        commit(patch);
+      }
+      // 哪个配方被设成了「启动默认」。存在 localStorage 里，重启后还在。
+      const DEFAULT_RECIPE_KEY = "dsh-weather-sandbox/defaultRecipe";
+      function readDefaultRecipeId() {
+        try { return window.localStorage.getItem(DEFAULT_RECIPE_KEY) || ""; } catch (e) { return ""; }
+      }
+      function setDefaultRecipeId(id) {
+        try {
+          if (id) window.localStorage.setItem(DEFAULT_RECIPE_KEY, id);
+          else window.localStorage.removeItem(DEFAULT_RECIPE_KEY);
+        } catch (e) { /* 存不下就只在本次会话生效 */ }
+      }
+
 
       let sliderFrame = 0;
       let pendingSlider = null;
@@ -5622,22 +6064,209 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       const onFab = () => setOpen(!open);
       fab.addEventListener("click", onFab);
       q(".oss-close").addEventListener("click", () => setOpen(false));
-      // 设为默认：把当前整套参数冻结成启动基准。
-      // 存完按钮短暂变成「已保存」，给个确认。
-      const saveBtn = q(".oss-save");
-      let saveFlash = 0;
-      saveBtn.addEventListener("click", () => {
-        saveUserDefaults();
-        saveBtn.classList.add("is-saved");
-        saveBtn.textContent = copy.saveDefault + " ✓";
-        if (saveFlash) win.clearTimeout(saveFlash);
-        saveFlash = win.setTimeout(() => {
-          saveBtn.classList.remove("is-saved");
-          saveBtn.textContent = copy.saveDefault;
-        }, 1200);
+      // ---- 配方：保存 / 列表 / 删除 ----
+      // 「保存配方」→ 弹命名框 → 确定就存进列表；点 ✕ 取消就什么都不存。
+      // 「配方 ▾」→ 展开列表，第一项「出厂设置」（来自 DEFAULTS），
+      //            下面是用户存的配方，每项右边一个 ✕ 可以删。
+      const recipeSaveBtn = q(".oss-recipe-save");
+      const recipeOpenBtn = q(".oss-recipe-open");
+
+      // 命名框：一个浮在主面板底部的小输入条。
+      const recipeNamer = doc.createElement("div");
+      recipeNamer.className = "oss-recipe-namer";
+      recipeNamer.style.cssText = [
+        // 必须比面板高：面板是 2147480101、草地子面板 2147480102。
+        // 写 99 的时候输入框被面板整个盖住 —— 用户看到的就是「没有浮在面板之上」。
+        "display:none", "position:fixed", "z-index:2147480110",
+        "align-items:center", "gap:6px",
+        // 只留这一层：外面的框。输入框自己不再画边框/背景，否则就是双夹层。
+        "padding:4px 8px", "border-radius:8px",
+        "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 92%, transparent)",
+        "border:1px solid #d9a93c99",
+        "backdrop-filter:blur(10px)", "-webkit-backdrop-filter:blur(10px)",
+        "box-shadow:0 2px 12px #00000033",
+        "font:inherit", "font-size:11px",
+      ].join(";");
+      recipeNamer.innerHTML = [
+        '<input class="oss-recipe-input" type="text" maxlength="24" placeholder="起个名字"',
+        ' style="width:104px;padding:2px 0;border:0;background:transparent;',
+        'color:inherit;font:inherit;outline:none" />',
+        '<button type="button" class="oss-recipe-ok" style="border:0;background:transparent;color:#c9922a;',
+        'font:inherit;font-weight:600;cursor:pointer;padding:2px 3px">确定</button>',
+        '<button type="button" class="oss-recipe-cancel" style="border:0;background:transparent;color:#888;',
+        'font:inherit;cursor:pointer;padding:2px 3px">✕</button>',
+      ].join("");
+      (doc.body || doc.documentElement).appendChild(recipeNamer);
+      const recipeInput = recipeNamer.querySelector(".oss-recipe-input");
+      const hideNamer = () => { recipeNamer.style.display = "none"; };
+      const showNamer = () => {
+        const r = recipeSaveBtn.getBoundingClientRect();
+        // 右对齐到「保存配方」按钮的右边缘，再往左收一点点。
+        // 之前是 left = 按钮左 - 40，结果整条伸到屏幕右边去，「确定」点不到。
+        recipeNamer.style.display = "inline-flex";   // 先显示，才量得到宽度
+        const w = recipeNamer.offsetWidth || 180;
+        const rightEdge = r.right;
+        recipeNamer.style.left = Math.max(8, rightEdge - w) + "px";
+        recipeNamer.style.top = (r.top - 44) + "px";
+        recipeInput.value = "";
+        win.setTimeout(() => { try { recipeInput.focus(); } catch (e) { /* 忽略 */ } }, 0);
+      };
+
+      // 配方列表：一个浮层，点「配方 ▾」展开。
+      const recipeList = doc.createElement("div");
+      recipeList.className = "oss-recipe-list";
+      recipeList.style.cssText = [
+        // 同上：列表也要压在面板之上
+        "display:none", "position:fixed", "z-index:2147480110",
+        "min-width:190px", "max-width:240px", "max-height:320px", "overflow:auto",
+        "padding:6px", "border-radius:10px",
+        "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 94%, transparent)",
+        "border:1px solid #d9a93c99",
+        "backdrop-filter:blur(12px)", "-webkit-backdrop-filter:blur(12px)",
+        "box-shadow:0 4px 18px #00000040",
+        "font:inherit", "font-size:11.5px",
+      ].join(";");
+      (doc.body || doc.documentElement).appendChild(recipeList);
+
+      const closeRecipeList = () => { recipeList.style.display = "none"; };
+      const renderRecipeList = () => {
+        const rows = [];
+        const defId = readDefaultRecipeId();
+        // 第一项永远是出厂设置。它也要能「设为默认」——
+        // 用户调乱了想回到干净状态当启动基准，这条路必须留着。
+        // 出厂设置的默认标记用空字符串表示（id 为空 = 默认就是出厂值）。
+        const builtinIsDefault = !defId;
+        rows.push(
+          '<div class="oss-recipe-item oss-recipe-builtin" data-builtin="1" style="display:flex;align-items:center;gap:6px;',
+          'padding:5px 7px;border-radius:6px;cursor:pointer">',
+          '<span style="flex:1;font-weight:600;color:' + (builtinIsDefault ? "#e8b64a" : "#fff") + '">出厂设置</span>',
+          '<button type="button" class="oss-recipe-def" data-def="__builtin__"',
+          ' style="display:none;border:0;background:transparent;color:#c9922a;cursor:pointer;',
+          'font:inherit;font-size:10px;padding:0 3px;white-space:nowrap">设为默认</button>',
+          '</div>'
+        );
+        const list = readRecipes();
+        for (const r of list) {
+          // 当前启动默认的那一条标黄
+          const isDef = defId && r.id === defId;
+          const nameColor = isDef ? "#e8b64a" : "#fff";
+          rows.push(
+            '<div class="oss-recipe-item" data-id="' + r.id + '" style="display:flex;align-items:center;gap:6px;',
+            'padding:5px 7px;border-radius:6px;cursor:pointer;position:relative">',
+            '<span style="flex:1;color:' + nameColor + '">' + String(r.name).replace(/[<>&]/g, "") + '</span>',
+            // 悬停才出现的小字「设为默认」。mouseenter/mouseleave 控制显隐。
+            '<button type="button" class="oss-recipe-def" data-def="' + r.id + '"',
+            ' style="display:none;border:0;background:transparent;color:#c9922a;cursor:pointer;',
+            'font:inherit;font-size:10px;padding:0 3px;white-space:nowrap">设为默认</button>',
+            '<button type="button" class="oss-recipe-del" data-del="' + r.id + '" title="删除"',
+            ' style="border:0;background:transparent;color:#999;cursor:pointer;font:inherit;padding:0 2px">✕</button>',
+            '</div>'
+          );
+        }
+        if (!list.length) {
+          rows.push('<div style="padding:6px 8px;color:#888;font-size:10.5px">还没有保存过配方</div>');
+        }
+        recipeList.innerHTML = rows.join("");
+        // 悬停显示 / 隐藏「设为默认」
+        for (const item of recipeList.querySelectorAll(".oss-recipe-item")) {
+          const btn = item.querySelector(".oss-recipe-def");
+          if (!btn) continue;
+          item.addEventListener("mouseenter", () => { btn.style.display = "inline-block"; });
+          item.addEventListener("mouseleave", () => { btn.style.display = "none"; });
+        }
+      };
+
+      const openRecipeList = () => {
+        renderRecipeList();
+        const r = recipeOpenBtn.getBoundingClientRect();
+        recipeList.style.left = Math.max(8, r.right - 200) + "px";
+        recipeList.style.top = Math.max(8, r.top - 8 - 320) + "px";
+        recipeList.style.display = "block";
+      };
+
+      if (recipeSaveBtn) {
+        recipeSaveBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          showNamer();
+        });
+      }
+      recipeNamer.querySelector(".oss-recipe-cancel").addEventListener("click", hideNamer);
+      recipeNamer.querySelector(".oss-recipe-ok").addEventListener("click", () => {
+        if (saveRecipe(recipeInput.value)) {
+          hideNamer();
+          if (recipeSaveBtn) {
+            recipeSaveBtn.classList.add("is-saved");
+            win.setTimeout(() => recipeSaveBtn.classList.remove("is-saved"), 1200);
+          }
+        } else {
+          hideNamer();      // 名字空着就等于取消
+        }
       });
-      // 恢复默认：回到「最近一次保存的默认」，没保存过才回到出厂值。
-      q(".oss-reset").addEventListener("click", () => commit(readUserDefaults()));
+      recipeInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { recipeNamer.querySelector(".oss-recipe-ok").click(); }
+        if (e.key === "Escape") { hideNamer(); }
+        e.stopPropagation();   // 别让方向键/回车跑到世界那边去
+      });
+
+      if (recipeOpenBtn) {
+        recipeOpenBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (recipeList.style.display === "block") closeRecipeList();
+          else openRecipeList();
+        });
+      }
+      recipeList.addEventListener("click", (e) => {
+        // 「设为默认」优先：把这个配方冻结成启动默认，然后应用它、关面板、关列表。
+        const def = e.target.closest && e.target.closest("[data-def]");
+        if (def) {
+          e.stopPropagation();
+          const id = def.getAttribute("data-def");
+          if (id === "__builtin__") {
+            // 把出厂值冻结成启动基准。id 记成空 = 「默认就是出厂值」。
+            setDefaultRecipeId("");
+            commit(normalize(DEFAULTS));
+            saveUserDefaults(normalize(DEFAULTS));
+          } else {
+            const rec = readRecipes().find((r) => r.id === id);
+            if (!rec) return;
+            setDefaultRecipeId(id);
+            applyRecipe(rec.params);
+            saveUserDefaults();        // 把当前（刚应用的）参数写进启动基准
+          }
+          renderRecipeList();          // 让名字立刻变黄
+          closeRecipeList();
+          setOpen(false);              // 主面板也收起来
+          return;
+        }
+        const del = e.target.closest && e.target.closest("[data-del]");
+        if (del) {
+          e.stopPropagation();
+          const id = del.getAttribute("data-del");
+          deleteRecipe(id);
+          // 删掉的正好是启动默认那条：把默认标记也清掉
+          if (readDefaultRecipeId() === id) setDefaultRecipeId("");
+          renderRecipeList();
+          return;
+        }
+        const item = e.target.closest && e.target.closest(".oss-recipe-item");
+        if (!item) return;
+        e.stopPropagation();
+        if (item.getAttribute("data-builtin") === "1") {
+          commit(normalize(DEFAULTS));
+        } else {
+          const id = item.getAttribute("data-id");
+          const rec = readRecipes().find((r) => r.id === id);
+          if (rec) applyRecipe(rec.params);
+        }
+        closeRecipeList();
+      });
+      // 点别处收起列表
+      doc.addEventListener("pointerdown", (e) => {
+        if (recipeList.style.display !== "block") return;
+        if (recipeList.contains(e.target) || (recipeOpenBtn && recipeOpenBtn.contains(e.target))) return;
+        closeRecipeList();
+      }, true);
+
       // 纯壁纸模式：进入后屏幕中央会有「回到界面」按钮
       q(".oss-immersive").addEventListener("click", () => {
         setOpen(false);
@@ -5691,34 +6320,8 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         debugPane.hidden = !next;
         debugBtn.setAttribute("aria-expanded", next ? "true" : "false");
       });
-      // 草地子面板自己的「设为默认 / 恢复默认」：只针对草地那几项，
-      // 不去动主面板的其它参数（否则用户以为只存了草地，其实全存了）。
-      const GRASS_KEYS = ["groundVisible", "groundDensity", "flowerDensity", "snowCover", "wetness"];
-      const grassSave = grassPanel.querySelector(".oss-grass-save");
-      const grassReset = grassPanel.querySelector(".oss-grass-reset");
-      if (grassSave) {
-        grassSave.addEventListener("click", () => {
-          try {
-            saveDefaultsPartial(GRASS_KEYS);
-            grassSave.classList.add("is-saved");
-            grassSave.textContent = copy.saveDefault + " ✓";
-            setTimeout(() => {
-              grassSave.classList.remove("is-saved");
-              grassSave.textContent = copy.saveDefault;
-            }, 1200);
-          } catch (error) { /* 存不下就算了，不影响其它 */ }
-        });
-      }
-      if (grassReset) {
-        grassReset.addEventListener("click", () => {
-          try {
-            const d = readUserDefaults();
-            const patch = {};
-            for (const k of GRASS_KEYS) patch[k] = d[k];
-            commit(patch);
-          } catch (error) { /* 同上 */ }
-        });
-      }
+      // 草地子面板不再有自己的保存按钮 —— 配方统一在主面板底部，
+      // 一个配方包含天气 + 地形（见 RECIPE_KEYS）。
       enabledBox.addEventListener("change", () => commit({ enabled: enabledBox.checked }));
       // 只切海面：立刻把开关推给引擎，不等下一拍 —— 用户点了就想看到反应。
       if (seaVisibleBox) {
@@ -5867,26 +6470,491 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       if (petOnBox) {
         petOnBox.addEventListener("change", () => {
           const on = petOnBox.checked;
-          try { petEntity.setActive(on); } catch (error) { /* 鱼主体没起来 */ }
+          try { petEntity.setActive(on); } catch (error) { /* 生灵没起来 */ }
         });
       }
 
-      // ---- 手动让它睡觉 ----
+      // ---- 手动让它睡 ----
       // 调调度器暴露的 sleepNow()，它会打断当前这段、走完整的「开始→循环→起来」三连。
-      // 按钮点一下就够了，不需要状态 —— 睡完它自己回队列。
+      // 只有这条路会弹头顶的梦境面板（sleepByUser = true）。
       const petSleepBtn = q(".oss-pet-sleep");
       if (petSleepBtn) {
         petSleepBtn.addEventListener("click", () => {
           try { petScheduler.sleepNow(); } catch (error) { /* 调度器没起来 */ }
         });
       }
+      const petSceneryBtn = q(".oss-pet-scenery");
+      if (petSceneryBtn) {
+        petSceneryBtn.addEventListener("click", () => {
+          try { petScheduler.sceneryNow(); } catch (error) { /* 调度器没起来 */ }
+        });
+      }
+
+      // ---- 日记浮层 ----
+      // 点「日记」展开的一列文字。不做翻页动画 —— 用户未必会看，先让它存在。
+      const diaryPanel = doc.createElement("div");
+      diaryPanel.className = "oss-diary";
+      diaryPanel.style.cssText = [
+        "display:none", "position:fixed", "z-index:2147480110",
+        // 固定高度，只装得下三条。多了用滚动条拖 —— 不固定的话
+        // 条目堆到 50 条时这个框会一直往下长，盖住半个画面。
+        // 一行头（10px）+ 正文一行（约 19px）+ 内边距，一条约 44px；
+        // 三条 + 标题 + 上下内边距 ≈ 170px。
+        "width:260px", "height:170px", "overflow-y:auto", "overflow-x:hidden",
+        // 细一点的滚动条，别喧宾夺主
+        "scrollbar-width:thin",
+        "padding:10px 12px", "border-radius:10px",
+        "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 94%, transparent)",
+        "border:1px solid #d9a93c99",
+        "backdrop-filter:blur(12px)", "-webkit-backdrop-filter:blur(12px)",
+        "box-shadow:0 4px 18px #00000040",
+        "font:inherit", "font-size:11.5px", "line-height:1.65",
+      ].join(";");
+      (doc.body || doc.documentElement).appendChild(diaryPanel);
+
+      const renderDiary = () => {
+        const list = readDiary();
+        const nm = readPetName();
+        const titleText = nm ? (nm + "的做梦日记") : "它的做梦日记";
+        const title = '<div style="font-size:10px;letter-spacing:.16em;color:#c9922a;'
+          + 'margin-bottom:6px">' + titleText.replace(/[<>&]/g, "") + '</div>';
+        if (!list.length) {
+          diaryPanel.innerHTML = title
+            + '<div style="color:#888;font-size:10.5px">还没有做过梦。点「睡觉与做梦」，等它睡一觉。</div>';
+          return;
+        }
+        const rows = list.slice().reverse().map((e) => {
+          const day = Number.isFinite(e.day) ? e.day : 0;
+          const y = Math.floor(day / DAYS_PER_YEAR);
+          const stamp = y > 0 ? (y + " 年 " + (day % DAYS_PER_YEAR) + " 天") : ("第 " + day + " 天");
+          const wx = e.weather ? (" · " + String(e.weather).replace(/[<>&]/g, "")) : "";
+          return '<div style="padding:5px 0;border-top:1px solid #00000010">'
+            + '<div style="color:#c9922a;font-size:10px">' + stamp + wx + '</div>'
+            + '<div>' + String(e.text || "").replace(/[<>&]/g, "") + '</div></div>';
+        });
+        diaryPanel.innerHTML = title + rows.join("");
+      };
+
+      const petDiaryBtn = q(".oss-pet-diary");
+      if (petDiaryBtn) {
+        petDiaryBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (diaryPanel.style.display === "block") { diaryPanel.style.display = "none"; return; }
+          renderDiary();
+          const r = petDiaryBtn.getBoundingClientRect();
+          diaryPanel.style.left = Math.max(8, Math.min(window.innerWidth - 270, r.right - 260)) + "px";
+          diaryPanel.style.top = Math.max(8, r.top - 12 - 320) + "px";
+          diaryPanel.style.display = "block";
+        });
+      }
+      // 点别处收起
+      doc.addEventListener("pointerdown", (e) => {
+        if (diaryPanel.style.display !== "block") return;
+        if (diaryPanel.contains(e.target) || (petDiaryBtn && petDiaryBtn.contains(e.target))) return;
+        diaryPanel.style.display = "none";
+      }, true);
+
+      // ---- 给它起名 ----
+      // 起过名之后日记标题变成「小南的日记」。没起名保持「它的日记」。
+      const petNameBtn = q(".oss-pet-name");
+      const nameBox = doc.createElement("div");
+      nameBox.className = "oss-pet-namer";
+      nameBox.style.cssText = [
+        "display:none", "position:fixed", "z-index:2147480110",
+        "align-items:center", "gap:6px", "padding:4px 8px", "border-radius:8px",
+        "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 94%, transparent)",
+        "border:1px solid #d9a93c99",
+        "backdrop-filter:blur(12px)", "-webkit-backdrop-filter:blur(12px)",
+        "box-shadow:0 2px 12px #00000033",
+        "font:inherit", "font-size:11px",
+      ].join(";");
+      nameBox.innerHTML = [
+        '<input class="oss-pet-name-input" type="text" maxlength="12" placeholder="给它起个名字"',
+        ' style="width:96px;padding:2px 0;border:0;background:transparent;color:inherit;',
+        'font:inherit;outline:none" />',
+        '<button type="button" class="oss-pet-name-ok" style="border:0;background:transparent;',
+        'color:#c9922a;font:inherit;font-weight:600;cursor:pointer;padding:2px 3px">确定</button>',
+        '<button type="button" class="oss-pet-name-cancel" style="border:0;background:transparent;',
+        'color:#888;font:inherit;cursor:pointer;padding:2px 3px">✕</button>',
+      ].join("");
+      (doc.body || doc.documentElement).appendChild(nameBox);
+      const nameInput = nameBox.querySelector(".oss-pet-name-input");
+      const hideNameBox = () => { nameBox.style.display = "none"; };
+      if (petNameBtn) {
+        petNameBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (nameBox.style.display === "inline-flex") { hideNameBox(); return; }
+          nameBox.style.display = "inline-flex";
+          const w = nameBox.offsetWidth || 180;
+          const r = petNameBtn.getBoundingClientRect();
+          nameBox.style.left = Math.max(8, r.right - w) + "px";
+          nameBox.style.top = (r.top - 44) + "px";
+          nameInput.value = readPetName();
+          win.setTimeout(() => { try { nameInput.focus(); nameInput.select(); } catch (err) { /* 忽略 */ } }, 0);
+        });
+      }
+      nameBox.querySelector(".oss-pet-name-cancel").addEventListener("click", hideNameBox);
+      nameBox.querySelector(".oss-pet-name-ok").addEventListener("click", () => {
+        writePetName(String(nameInput.value || "").trim().slice(0, 12));
+        hideNameBox();
+        if (diaryPanel.style.display === "block") renderDiary();
+      });
+      nameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { nameBox.querySelector(".oss-pet-name-ok").click(); }
+        if (e.key === "Escape") { hideNameBox(); }
+        e.stopPropagation();
+      });
+
+      // ---- 壁纸模式下点鱼 / 点地面 ----
+      // 点在身上 → 播随机「点击回应」；点在别处 → 走过去。
+      // 只在沉浸态（壁纸与交互）生效：其他模式玩家在调参，不该被误触。
+      let lastPetScreen = null;      // 每帧由 place 之外的地方更新太贵，这里按需取
+      const onSkyClick = (e) => {
+        // 诊断用：确认这个监听到底有没有被调用、immersive 是什么值
+        console.log("[sky] click", { immersive, tx: e.clientX, ty: e.clientY, target: e.target && e.target.tagName });
+        if (!immersive) return;
+        // 点在面板 / 按钮上就不算（它们自己有处理）
+        if (e.target && e.target.closest && e.target.closest("button, input, .oss-dream, .oss-panel, .oss-subpanel")) return;
+        let pt = null;
+        try {
+          if (typeof win.__ossPetScreen === "function") pt = win.__ossPetScreen(1.0);
+        } catch (error) { /* 引擎没起来 */ }
+        if (!pt) return;
+        // 鱼在屏幕上大约 2.5 米高、宽高比 0.86 —— 用一个保守的矩形判命中。
+        let scale = 0.2;
+        try {
+          const pos = win.__ossPetPos ? win.__ossPetPos() : null;
+          if (pos && Number.isFinite(pos.z)) scale = Math.max(0.08, Math.min(0.45, 2.4 / Math.max(1, pos.z)));
+        } catch (error) { /* 用默认 */ }
+        const h = (window.innerHeight || 800) * scale;
+        const w = h * 0.86 * 0.6;      // 身子大概占屏幕上的这个宽度
+        const dx = Math.abs(e.clientX - pt.x);
+        const dy = Math.abs(e.clientY - (pt.y + h * 0.15));
+        if (dx < w && dy < h * 0.6) {
+          try { petScheduler.react(); } catch (error) { /* 调度器没起来 */ }
+          return;
+        }
+        // 点别处：让它走到鼠标落点正下方的地面上。
+        // 精确做法是反投影射线求地面交点（引擎里的 __ossScreenToGround），
+        // 拿到的是世界坐标，再换算成鱼用的「横向偏移 + 离相机米数」。
+        try {
+          if (typeof win.__ossScreenToGround !== "function") return;
+          const g = win.__ossScreenToGround(e.clientX, e.clientY);
+          if (!g || !Number.isFinite(g.x) || !Number.isFinite(g.z)) return;
+          // 世界 z → 对外「离相机的米数」：dist = 8.5 - (worldZ - 8.5) = 17 - worldZ
+          const dist = 17 - g.z;
+          const z = Math.max(4.8, Math.min(40, dist));
+          let halfW = 3;
+          try {
+            if (typeof win.__ossPetHalfWidth === "function") halfW = win.__ossPetHalfWidth(z);
+          } catch (error) { /* 用默认 */ }
+          const tx = Math.max(-halfW, Math.min(halfW, g.x));
+          // 走多远决定走多久：6 米以内 1.2 秒，越远越久，上限 3 秒
+          let cur = { x: 0, z: 8.5 };
+          try {
+            const pos = win.__ossPetPos ? win.__ossPetPos() : null;
+            if (pos) cur = { x: pos.x || 0, z: Number.isFinite(pos.z) ? pos.z : 8.5 };
+          } catch (error) { /* 用默认 */ }
+          const travel = Math.hypot(tx - cur.x, z - cur.z);
+          const dur = Math.max(0.9, Math.min(3.0, travel / 4));
+          petEntity.moveTo(tx, z, dur);
+          petScheduler.reactWalk();
+        } catch (error) { /* 引擎没起来 */ }
+      };
+      doc.addEventListener("pointerdown", onSkyClick, true);
+
+      // ---- 壁纸模式下的方向键 ----
+      // ↑ 往画面里走（远离镜头），↓ 走近，← → 横向。
+      // 只管鱼，不碰天气。和其他模式的按键不冲突：只在沉浸态响应。
+      const onArrowKey = (e) => {
+        if (!immersive) return;
+        const t = e.target;
+        // 焦点在输入框里就不拦 —— 那是用户真在打字
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+        const k = e.key;
+        if (k !== "ArrowUp" && k !== "ArrowDown" && k !== "ArrowLeft" && k !== "ArrowRight") return;
+        e.preventDefault();
+        let x = 0, z = 8.5;
+        try {
+          const pos = win.__ossPetPos ? win.__ossPetPos() : null;
+          if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.z)) { x = pos.x; z = pos.z; }
+        } catch (error) { /* 用默认 */ }
+        const STEP_X = 1.4, STEP_Z = 1.6;
+        if (k === "ArrowUp") z += STEP_Z;        // 远离镜头 = 往画面里
+        if (k === "ArrowDown") z -= STEP_Z;      // 走近
+        if (k === "ArrowLeft") x -= STEP_X;
+        if (k === "ArrowRight") x += STEP_X;
+        let halfW = 3;
+        try {
+          if (typeof win.__ossPetHalfWidth === "function") halfW = win.__ossPetHalfWidth(z);
+        } catch (error) { /* 用默认 */ }
+        x = Math.max(-halfW, Math.min(halfW, x));
+        z = Math.max(4.8, Math.min(40, z));
+        try {
+          petEntity.moveTo(x, z, 0.5);
+          petScheduler.reactWalk();
+        } catch (error) { /* 引擎没起来 */ }
+      };
+      doc.addEventListener("keydown", onArrowKey);
+
+      // ---- 梦境面板 ----
+      // 鱼睡着时浮在它头顶的一小块控制面板。纯透明 + 一圈柔光边框。
+      // 它操控的是真实的天气参数（走 commitLive，和主面板同一条通道），
+      // 所以「在梦里控住天气」不是特效，是真的生效。
+      //
+      // 定位：鱼睡在固定的窝里，所以屏幕坐标只需要在显示时取一次。
+      // 不做逐帧跟随 —— 它睡着不动，跟着动只会让数字抖。
+      const dream = ((onDreamDone) => {
+        const wrap = doc.createElement("div");
+        wrap.className = "oss-dream";
+        wrap.setAttribute("data-plugin", PLUGIN);
+        wrap.innerHTML = [
+          '<div class="oss-dream-title">梦中操控</div>',
+          '<label class="oss-dream-row"><span>花</span>',
+          '<input type="range" min="0" max="100" step="1" data-k="flower" /></label>',
+          '<label class="oss-dream-row"><span>草</span>',
+          '<input type="range" min="0" max="100" step="1" data-k="grass" /></label>',
+          '<label class="oss-dream-row"><span>天体</span>',
+          '<input type="range" min="0" max="100" step="1" data-k="sun" /></label>',
+          '<label class="oss-dream-row"><span>海浪</span>',
+          '<input type="range" min="0" max="100" step="1" data-k="sea" /></label>',
+          '<label class="oss-dream-row"><span>湿度</span>',
+          '<input type="range" min="0" max="100" step="1" data-k="humid" /></label>',
+          '<div class="oss-dream-hand" aria-hidden="true"></div>',
+        ].join("");
+        const inputs = {};
+        for (const el of wrap.querySelectorAll("input[data-k]")) inputs[el.dataset.k] = el;
+        const hand = wrap.querySelector(".oss-dream-hand");
+
+        // 梦境面板只是「镜子」：面板上这几根滑杆都不能被玩家拖。
+        // 真正在动的是那个手指（纯动画），实际效果由它去操纵主面板的滑杆实现。
+        for (const el of Object.values(inputs)) {
+          el.addEventListener("mousedown", (e) => e.preventDefault());
+          el.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+        }
+
+        const MAX = { flower: 100, grass: 100, sun: 100, sea: 100, humid: 100 };
+
+        // 梦境开始前的原始值。收起面板时原样写回。
+        let before = null;
+        let handTimer = 0;
+        let stopWalk = false;
+
+        const readAll = () => {
+          const s = readSettings();
+          return {
+            flower: s.flowerDensity,
+            grass: s.groundDensity,
+            sun: s.time,
+            sea: s.sea,
+            humid: s.humidPos,
+          };
+        };
+        const fillInputs = (v) => {
+          for (const k of Object.keys(inputs)) {
+            if (inputs[k] && v[k] !== undefined) inputs[k].value = String(v[k]);
+          }
+        };
+
+        // ---- 把值真正推给系统 ----
+        // 同时改主面板那根滑杆的显示值（用户看得见联动），再走它原本的通道。
+        // 节流 200ms：手指是每帧动的，但推设置不需要每帧 ——
+        // 每帧推一次会连带 paint() 里重推整个场景，那就是「一卡一卡」的来源。
+        let pending = null;
+        let flushTimer = 0;
+        const flush = () => {
+          flushTimer = 0;
+          const p = pending;
+          pending = null;
+          if (!p) return;
+          if (p.flower !== undefined) {
+            if (flowerDensityRange) flowerDensityRange.value = String(p.flower);
+            commit({ flowerDensity: p.flower });
+            pushGround();
+          }
+          if (p.grass !== undefined) {
+            if (groundDensityRange) groundDensityRange.value = String(p.grass);
+            commit({ groundDensity: p.grass });
+            pushGround();
+          }
+          if (p.sun !== undefined) {
+            if (timeRange) timeRange.value = String(p.sun);
+            commit({ time: p.sun, autoCycle: false });
+          }
+          if (p.sea !== undefined) {
+            if (seaRange) seaRange.value = String(p.sea);
+            commit({ sea: p.sea });
+          }
+          if (p.humid !== undefined) {
+            if (humidRange) humidRange.value = String(p.humid);
+            commit({ humidPos: p.humid });
+          }
+        };
+        const queuePush = (k, v) => {
+          pending = pending || {};
+          pending[k] = v;
+          if (!flushTimer) flushTimer = setTimeout(flush, 200);
+        };
+
+        host.append(wrap);
+
+        const place = () => {
+          let pt = null;
+          try {
+            if (typeof win.__ossPetScreen === "function") pt = win.__ossPetScreen(1.6);
+          } catch (error) { /* 引擎没起来 */ }
+          if (pt && Number.isFinite(pt.x) && Number.isFinite(pt.y)) {
+            wrap.style.left = Math.round(pt.x) + "px";
+            wrap.style.top = Math.round(pt.y) + "px";
+          } else {
+            wrap.style.left = "18%";
+            wrap.style.top = "62%";
+          }
+        };
+        let followTimer = 0;
+        const startFollow = () => {
+          stopFollow();
+          place();
+          followTimer = setInterval(place, 120);
+        };
+        const stopFollow = () => {
+          if (followTimer) clearInterval(followTimer);
+          followTimer = 0;
+        };
+
+        // ---- 滑杆在面板上的位置：显示时量一次，之后只读缓存 ----
+        let trackBoxes = {};
+        const measureTracks = () => {
+          const wrapBox = wrap.getBoundingClientRect();
+          trackBoxes = {};
+          for (const [k, el] of Object.entries(inputs)) {
+            const b = el.getBoundingClientRect();
+            trackBoxes[k] = { x: b.left - wrapBox.left, y: b.top - wrapBox.top, w: b.width, h: b.height };
+          }
+        };
+        const moveHandTo = (k, ratio) => {
+          const tb = trackBoxes[k];
+          if (!tb || !hand) return;
+          const pad = 6;
+          const x = tb.x + pad + (tb.w - pad * 2) * ratio;
+          const y = tb.y + tb.h / 2;
+          hand.style.transform = "translate(" + x + "px," + y + "px)";
+          hand.classList.add("is-visible");
+        };
+
+        // ---- 一根滑杆的滑动动画 ----
+        // 每帧：手指位置 + 梦境滑杆显示值（纯 DOM 属性，不触发 input 事件）。
+        // 真正推设置走 queuePush，200ms 一次。
+        const glide = (k, target) => new Promise((resolve) => {
+          const el = inputs[k];
+          if (!el) { resolve(); return; }
+          const from = Number(el.value);
+          const max = MAX[k] || 100;
+          // 天体走得最慢：太阳一跳一大截，眼睛跟不上。
+          const dur = k === "sun" ? (5000 + Math.random() * 2000)
+                                  : (2600 + Math.random() * 1000);
+          const t0 = performance.now();
+          const tick = (now) => {
+            if (stopWalk || !wrap.classList.contains("is-on")) { resolve(); return; }
+            const u = Math.min(1, (now - t0) / dur);
+            const e = 0.5 - 0.5 * Math.cos(Math.PI * u);   // easeInOutSine
+            const v = from + (target - from) * e;
+            el.value = String(v);                            // 只改显示，不派发事件
+            moveHandTo(k, Math.max(0, Math.min(1, v / max)));
+            queuePush(k, Math.round(v));
+            if (u < 1) requestAnimationFrame(tick);
+            else resolve();
+          };
+          requestAnimationFrame(tick);
+        });
+
+        // ---- 一次梦境：五根滑杆挨个玩一遍，每根推出去再拉回来 ----
+        const dreamWalk = async () => {
+          stopWalk = false;
+          const order = Object.keys(inputs);
+          for (let i = order.length - 1; i > 0; i -= 1) {
+            const j = (Math.random() * (i + 1)) | 0;
+            [order[i], order[j]] = [order[j], order[i]];
+          }
+          const pick = (k) => {
+            if (k === "flower" || k === "grass") return Math.round(20 + Math.random() * 70);
+            if (k === "sun") return Math.round(20 + Math.random() * 60);
+            return Math.round(15 + Math.random() * 70);      // sea / humid
+          };
+          // 梦里把每根滑杆推到过什么值 —— 日记要写这个。
+          // 注意：推出去之后会拉回 home，所以「最终值」没变化；
+          // 有意义的是「它梦里想调成什么」，记录的就是那个峰值。
+          const dreamPeaks = {};
+          for (const k of order) {
+            if (stopWalk || !wrap.classList.contains("is-on")) return;
+            const home = Number(inputs[k].value);
+            moveHandTo(k, home / (MAX[k] || 100));
+            await new Promise((r) => setTimeout(r, 260));
+            const peak = pick(k);
+            dreamPeaks[k] = { home, peak };
+            await glide(k, peak);
+            await new Promise((r) => setTimeout(r, 220));
+            await glide(k, home);
+            await new Promise((r) => setTimeout(r, 220));
+          }
+          if (typeof onDreamDone === "function") onDreamDone(dreamPeaks);
+          if (wrap.classList.contains("is-on")) toggleDream(false);
+        };
+
+        // 面板显示 / 收起。dreamWalk 玩完之后要自己调它收面板。
+        const toggleDream = (show) => {
+          if (show) {
+            before = readAll();
+            fillInputs(before);
+            startFollow();
+            wrap.classList.add("is-on");
+            clearTimeout(handTimer);
+            requestAnimationFrame(() => {
+              measureTracks();
+              handTimer = setTimeout(() => { dreamWalk(); }, 1200);
+            });
+          } else {
+            stopWalk = true;
+            stopFollow();
+            wrap.classList.remove("is-on");
+            clearTimeout(handTimer);
+            if (hand) hand.classList.remove("is-visible");
+            // ---- 还原 ----
+            // 收起面板就把五个值写回梦境开始前的快照。
+            // 手指只是动画，用户设置不能被梦改坏。
+            if (before) {
+              commit({
+                flowerDensity: before.flower,
+                groundDensity: before.grass,
+                time: before.sun,
+                sea: before.sea,
+                humidPos: before.humid,
+              });
+              pushGround();
+              fillInputs(before);
+              before = null;
+            }
+          }
+        };
+
+        return {
+          toggle: toggleDream,
+          dispose() {
+            stopWalk = true;
+            clearTimeout(handTimer);
+            if (flushTimer) clearTimeout(flushTimer);
+            stopFollow();
+            wrap.remove();
+          },
+        };
+      })((peaks) => { addDiaryEntry(peaks); });
+      dreamToggle = dream.toggle;      // 接上调度器的 onDream
 
       win.__openSeaShelter = {
         get settings() { return readSettings(); },
         set: (patch) => commit(patch),
         // 恢复 = 回到用户保存过的默认（没保存过才是出厂值）
         reset: () => commit(readUserDefaults()),
-        // 把当前设置存成默认，下次启动就用这套
         saveDefault: () => saveUserDefaults(),
         open: () => setOpen(true),
         close: () => setOpen(false),
@@ -5902,7 +6970,9 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         stopOcean();
         win.removeEventListener("message", onOceanMessage);
         doc.removeEventListener("pointerdown", onPointer, true);
+        doc.removeEventListener("pointerdown", onSkyClick, true);
         doc.removeEventListener("keydown", onKey);
+        doc.removeEventListener("keydown", onArrowKey);
         win.removeEventListener("pagehide", onPageHide);
         if (typeof offTheme === "function") offTheme();
         engine.dispose();
@@ -5910,6 +6980,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         // 它的 canvas 也在 pane 里，pane.remove() 之后 rAF 还在跑就白烧 CPU。
         try { petEntity.dispose(); } catch (error) { /* 同上 */ }
         try { petScheduler.dispose(); } catch (error) { /* 同上 */ }
+        try { dream.dispose(); } catch (error) { /* 同上 */ }
         clearGlass();
         fab.remove();
         panel.remove();
@@ -5921,6 +6992,7 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         stopDrive();
         try { petEntity.dispose(); } catch (error) { /* 同上 */ }
         try { petScheduler.dispose(); } catch (error) { /* 同上 */ }
+        try { dream.dispose(); } catch (error) { /* 同上 */ }
         for (const node of [fab, panel, pane]) if (node.parentNode) node.parentNode.removeChild(node);
         if (uiStyle.parentNode) uiStyle.parentNode.removeChild(uiStyle);
         clearGlass();
