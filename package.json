@@ -1,74 +1,76 @@
 {
-    "name":  "dsh-weather-sandbox",
-    "displayName":  "天气演化沙盒",
-    "version":  "1.0.0",
-    "description":  "天气演化沙盒：一片会自己变天气的海。太阳会升落，云会飘会散，风从气压来，草跟着风一片片伏下去。下雨、下雪、积水、融雪，全自动循环。草地里还住着一条会自己走走停停、看得见天气变化的大肥鱼。零依赖。",
-    "type":  "module",
-    "main":  "index.js",
-    "exports":  {
-                    ".":  "./index.js",
-                    "./client":  "./client/index.js",
-                    "./cordis.patch.yml":  "./cordis.patch.yml",
-                    "./icon":  "./icon.svg",
-                    "./locale/*.json":  "./locale/*.json",
-                    "./package.json":  "./package.json"
-                },
-    "files":  [
-                  "index.js",
-                  "client/",
-                  "static/",
-                  "cordis.patch.yml",
-                  "locale/*.json",
-                  "docs",
-                  "assets/",
-                  "LICENSES/",
-                  "screenshots.json",
-                  "icon.svg",
-                  "README.md",
-                  "CREDITS.md",
-                  "LICENSE",
-                  "HANDOFF.md",
-                  "PET-INTEGRATION.md"
-              ],
-    "dsh":  {
-                "bundle":  {
-                               "patch":  "./cordis.patch.yml"
-                           },
-                "client":  {
-                               "platform":  "web",
-                               "immediately":  true,
-                               "inject":  [
-                                              "@deepseek-ai/dsh-client-ui-theme"
-                                          ]
-                           }
-            },
-    "keywords":  [
-                     "deepseek",
-                     "harness",
-                     "dsh",
-                     "dsh-plugin",
-                     "weather",
-                     "simulation",
-                     "ocean",
-                     "rain",
-                     "snow",
-                     "sandbox"
-                 ],
-    "repository":  {
-                       "type":  "git",
-                       "url":  "git+https://github.com/deepnoseedown/dsh-weather-sandbox.git"
-                   },
-    "engines":  {
-                    "dsh":  "\u003e=0.2.0-rc.1"
-                },
-    "peerDependencies":  {
-                             "@deepseek-ai/dsh-client-ui-theme":  "\u003e=0.2.0-rc.1"
-                         },
-    "peerDependenciesMeta":  {
-                                 "@deepseek-ai/dsh-client-ui-theme":  {
-                                                                          "optional":  false
-                                                                      }
-                             },
-    "license":  "MIT",
-    "homepage":  "https://github.com/deepnoseedown/dsh-weather-sandbox#readme"
+    "name": "dsh-weather-sandbox",
+    "displayName": "deepnoseedown · AI 原生创世沙盒",
+    "version": "2.0.0",
+    "description": "AI 原生创世沙盒。点一下「创世」，一个新 AI 就降临到这个世界里 —— 它出生就带着两本手册（怎么动手、怎么想），然后用十四个工具直接盖东西。你也能：拖一张照片进世界，它变成真方块，背景和人物自动分开、人物浮在前面有厚度。建造全程零 AI 成本 —— 因为执行这件事根本不需要 AI 参与。底下还站着一个遵循真实物理的世界：气温、气压、水汽、风场，会自己下雨下雪、积水融雪，草跟着风一片片伏下去，那条大肥鱼会走动、会做梦、在日记本上写字。",
+    "type": "module",
+    "main": "index.js",
+    "exports": {
+        ".": "./index.js",
+        "./client": "./client/index.js",
+        "./cordis.patch.yml": "./cordis.patch.yml",
+        "./icon": "./icon.svg",
+        "./locale/*.json": "./locale/*.json",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "index.js",
+        "client/",
+        "static/",
+        "voxel/",
+        "cordis.patch.yml",
+        "locale/*.json",
+        "docs",
+        "assets/",
+        "LICENSES/",
+        "screenshots.json",
+        "icon.svg",
+        "README.md",
+        "CREDITS.md",
+        "LICENSE"
+    ],
+    "dsh": {
+        "bundle": {
+            "patch": "./cordis.patch.yml"
+        },
+        "client": {
+            "platform": "web",
+            "immediately": true,
+            "inject": [
+                "@deepseek-ai/dsh-client-ui-theme"
+            ]
+        }
+    },
+    "keywords": [
+        "deepseek",
+        "harness",
+        "dsh",
+        "dsh-plugin",
+        "ai-native",
+        "sandbox",
+        "voxel",
+        "voxel-art",
+        "building",
+        "world-canvas",
+        "image-to-voxel",
+        "weather",
+        "simulation"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/deepnoseedown/dsh-weather-sandbox.git"
+    },
+    "engines": {
+        "dsh": ">=0.2.0-rc.1"
+    },
+    "peerDependencies": {
+        "@deepseek-ai/dsh-client-ui-theme": ">=0.2.0-rc.1"
+    },
+    "peerDependenciesMeta": {
+        "@deepseek-ai/dsh-client-ui-theme": {
+            "optional": false
+        }
+    },
+    "license": "MIT",
+    "homepage": "https://github.com/deepnoseedown/dsh-weather-sandbox#readme"
 }

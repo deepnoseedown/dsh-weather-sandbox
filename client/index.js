@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
     // 版本号同时是引擎脚本的缓存键（ocean-engine.js?v=VERSION）。
     // 每次改 static/ocean-engine.js 都必须把这里加一，否则浏览器会拿旧引擎，
     // 表现为「改了代码但页面没变化」——闪电不闪、隐藏模式不生效都是这个原因。
-    const VERSION = "1.210.0";
+    const VERSION = "1.292.0";
     const ASSET_BASE = "/dsh-weather-sandbox/";
     const STORE_KEY = "dsh-weather-sandbox/v1";
 
@@ -147,6 +147,18 @@ window.__ModuleLoader__.load({
       // 详细映射见引擎 lodForDensity()。
       groundVisible: false,
       groundDensity: 50,
+      // 方块大陆（第三块地形）：线条骨架。默认【关】——不偷改现有观感。
+      // 它和海面/草地互斥：勾上之后引擎强制不画海和草（线条要在纯背景上才看得清），
+      // 但不动 seaVisible / groundVisible 本身，取消勾选后两者原样回来。
+      // 勾上同时解锁相机：从固定的 CAM_POS 切成可 360° 环绕的 Orbit。
+      voxelVisible: false,
+      // 方块大陆的辅助网格（32 米外框线 + 底座砖缝）。默认开。
+      // 关掉只收起辅助线，底座本身还在 —— 那是地面，不是网格。
+      // 创世大陆的两个子开关：底座（大陆本身）和建筑。
+      // 关底座 → 建筑悬在草地/海面上（降临）；关建筑 → 只剩空工地。
+      // 两个都关 → 整层不存在（会连带把 voxelVisible 关掉）。
+      voxelPlate: true,
+      voxelBuild: true,
       // 花密度：和草密度同一档（0~100），默认 50。
       // 0 = 零星几朵，100 = 铺满（约 6000 朵 / 30m 圆盘 ≈ 2.1 朵/㎡）。
       flowerDensity: 50,
@@ -355,6 +367,10 @@ window.__ModuleLoader__.load({
       { key: "seaVisible", type: "bool",  boolDefault: true,  fallback: DEFAULTS.seaVisible },
       // 草地：独立地形层。默认关，勾上才画。
       { key: "groundVisible", type: "bool",   boolDefault: false, fallback: DEFAULTS.groundVisible },
+      // 方块大陆：第三块地形。勾上 = 线条骨架 + 可转相机，同时强制关掉海面和草地。
+      { key: "voxelVisible", type: "bool",   boolDefault: false, fallback: DEFAULTS.voxelVisible },
+      { key: "voxelPlate", type: "bool", boolDefault: true,  fallback: DEFAULTS.voxelPlate },
+      { key: "voxelBuild", type: "bool", boolDefault: true,  fallback: DEFAULTS.voxelBuild },
       { key: "groundDensity", type: "number", min: 0, max: 100,   fallback: DEFAULTS.groundDensity },
       { key: "flowerDensity", type: "number", min: 0, max: 100,   fallback: DEFAULTS.flowerDensity },
       { key: "snowCover",     type: "number", min: 0, max: 100,   fallback: DEFAULTS.snowCover },
@@ -3116,6 +3132,18 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       const doc = document;
       const win = window;
 
+      // 【清掉所有可能残留的节点】
+      // 原来只清了 IDS.pane / fab / panel / ui / glass 这几个 id。
+      // 但左下角那几个按钮的 id 是 "P-ai"、"P-help" 这类【派生 id】，
+      // 它们和 "P" 不是同一个字符串，querySelectorAll("#P") 匹配不到。
+      //
+      // 后果：插件重载（apply 再跑一次）时，旧的面板节点还在 DOM 里，
+      // 新代码又建一个新的，于是左下角出现两套按钮。
+      // 用户点了「创世大陆」时看到「又弹出一个面板」，就是这个原因。
+      //
+      // 现在用【前缀匹配】把所有以 P 开头的节点全清掉，
+      // 以后再加任何派生 id 都不会漏。
+      for (const stale of doc.querySelectorAll('[id^="' + IDS.pane + '"]')) stale.remove();
       for (const id of [IDS.pane, IDS.fab, IDS.panel, IDS.ui, IDS.glass]) {
         for (const stale of doc.querySelectorAll("#" + id)) stale.remove();
       }
@@ -3225,6 +3253,15 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       let dpadHint = null;      // 「回到界面」左边的方向键提示
       function setImmersive(next) {
         immersive = !!next;
+        // 【退出沉浸 ≠ 退出方块大陆】（本轮改动）
+        // 原来这里是「退出沉浸就自动取消勾选方块大陆」，理由是
+        // 「回到有对话框的界面鼠标就转不动世界了，方块层只剩一张背景图」。
+        // 但这个理由现在不成立了：
+        //   1. 用户需要「切出去和 AI 说话 → 切回来看方块长出来」，
+        //      取消勾选会把世界重置（引擎模块被卸载重建），说一句话世界就没了。
+        //   2. 背后那张方块图继续画着，本来也不影响前面的界面。
+        // 所以现在退出沉浸只把界面还回来，方块世界原地保留。
+        // 真要关方块大陆，用户自己去取消那个勾选框 —— 那是显式操作。
         paintGlass(readSettings().glass);
         if (immersive) {
           if (!restoreBtn) {
@@ -3297,7 +3334,2759 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           restoreBtn = null;
           if (dpadHint) { dpadHint.remove(); dpadHint = null; }
         }
+        // 方块大陆的动作按钮：进了世界就出，离开世界就收。
+        // 它们属于「在世界里操作」，所以不在面板里，直接浮在画面右下角。
+        updateVoxelHud();
+        // 对话按钮的文字跟着沉浸状态走（「对话」/「看世界」）
+        try { syncTalkButton() } catch (error) { /* 按钮还没建 */ }
+        // 底部物品栏（材质选择）：同一个条件 —— 只有方块世界里才有东西可建。
+        updateHotbar();
+        // AI 建造台：和物品栏同一个条件 —— 只在方块世界里出现。
+        // 它是第二种建造方式（AI 一句话建），和手搭并列。
+        updateAiPanel();
+        // 【重新进方块世界 = 重启 AI 通道轮询】
+        // 轮询在连续失败 5 次后会自己停下（避免 404 刷屏拖死页面）。
+        // 用户重新进来时给它一次机会 —— 这时候 Host 路由通常已经就绪了。
+        try {
+          if (immersive && readSettings().voxelVisible === true) {
+            aiChannelStopped = false
+            aiFailCount = 0
+            aiPollDelay = AI_POLL_FAST
+            if (!aiPollTimer && !aiPolling) scheduleAiPoll(300)
+          }
+        } catch (error) { /* 忽略 */ }
       }
+
+      // ============================================================
+      //  世界里的方块动作条（收纳 / 放回）
+      // ============================================================
+      // 为什么不放在面板里：
+      //   面板是「调世界参数」的地方，而收纳/放回是「在世界里动手」。
+      //   玩家进了方块大陆，界面全让开了，按钮应该跟着世界一起出现，
+      //   放在右下角和「回到界面」并排 —— 那里本来就是世界的控制区。
+      let voxelHud = null
+      let voxelHudCollect = null
+      let voxelHudPlace = null
+      let voxelHudStat = null
+      let voxelHudDemolish = null
+
+      function buildVoxelHud() {
+        const host = doc.createElement("div")
+        host.id = IDS.pane + "-voxel-hud"
+        host.style.cssText = [
+          "position:fixed", "right:14px", "bottom:52px", "z-index:2147480098",
+          "display:none", "flex-direction:column", "align-items:flex-end", "gap:8px",
+          "pointer-events:none",
+        ].join(";")
+
+        const stat = doc.createElement("div")
+        stat.style.cssText = [
+          "font:inherit", "font-size:11px", "font-weight:600",
+          "padding:3px 9px", "border-radius:999px",
+          "background:#000000cc", "color:#fff", "letter-spacing:.2px",
+          "pointer-events:none", "display:none",
+        ].join(";")
+
+        const row = doc.createElement("div")
+        row.style.cssText = "display:flex;gap:8px;pointer-events:auto"
+
+        const mkBtn = (label, title) => {
+          const b = doc.createElement("button")
+          b.type = "button"
+          b.textContent = label
+          b.title = title || label
+          b.style.cssText = [
+            "height:30px", "padding:0 12px", "border-radius:999px",
+            "display:inline-flex", "align-items:center", "justify-content:center", "cursor:pointer",
+            "font:inherit", "font-size:11.5px", "font-weight:600", "letter-spacing:.3px", "white-space:nowrap",
+            "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 82%, transparent)",
+            "border:1px solid #ffffff66", "color:inherit",
+            "backdrop-filter:blur(10px)", "-webkit-backdrop-filter:blur(10px)",
+            "box-shadow:0 2px 12px #00000044",
+          ].join(";")
+          b.addEventListener("mouseenter", () => { b.style.filter = "brightness(1.15)" })
+          b.addEventListener("mouseleave", () => { b.style.filter = "" })
+          return b
+        }
+
+        // 固化：把零散的几块合成一个整体。
+        // 没有它的话，分几次建出来的楼是「好几栋」——
+        // 拖动只动其中一栋，地基走了上层留在原地。
+        const fuse = mkBtn("固化并保存图纸", "把所有建筑合并成一个整体，同时把图纸存进仓库")
+        // 一键拆除：拆干净，砖全部进仓库。
+        // 和「收纳」的区别要说清：
+        //   收纳 = 存成蓝图（以后能放回来）
+        //   拆除 = 变回散砖（砖进仓库，蓝图没了）
+        const demolish = mkBtn("拆除", "拆掉世界里所有方块，砖块全部收进仓库")
+        // 重置：清空存档，重新搭样板凉亭。
+        // 它是「我把世界搞乱了想重来」的出口 —— 也顺便清掉 localStorage 里的存档。
+        const reset = mkBtn("重置", "清空世界并重新搭一座样板凉亭")
+        // 仓库：一次看三样东西 —— 砖头 / 图纸 / 宏
+        const wh = mkBtn("仓库", "查看砖头、图纸、宏三个仓库")
+        fuse.addEventListener("click", onVoxelFuse)
+        demolish.addEventListener("click", onVoxelDemolish)
+        reset.addEventListener("click", onVoxelReset)
+        wh.addEventListener("click", toggleWarehouses)
+
+        row.append(fuse, demolish, reset, wh)
+        host.append(stat, row)
+        doc.body.appendChild(host)
+
+        voxelHud = host
+        voxelHudCollect = collect
+        voxelHudPlace = place
+        voxelHudStat = stat
+        voxelHudDemolish = demolish
+      }
+
+      // 固化：把所有建筑合成一个整体。
+      // 场景：分几次建出来的楼是好几栋，拖一栋其他不动。
+      // 合并后共享一个 buildId —— 拖、转、拆存图纸都按整栋算。
+      // 固化：把零散的建筑合成一个整体，并且【存进图纸仓库】。
+      //
+      // 【为什么要存图纸】
+      // 之前只做合并，结果是「固化完仓库里什么都没有」——
+      // 固化在用户看来就是「把这栋楼定下来」，定下来的东西当然该有档案。
+      // 而且不存的话，拆掉它就彻底没了，固化等于白做。
+      //
+      // 【为什么要求命名】
+      // 「整体-001」这种自动名没有意义，用户分不清哪个是哪个。
+      // 让用户起个名字（或看到默认名直接确认），图纸仓库才是有用的。
+      function onVoxelFuse() {
+        const vp = win.__voxelPass
+        if (!vp || typeof vp.mergeBuildings !== "function") {
+          aiLog("固化不可用：引擎没有 mergeBuildings")
+          return
+        }
+        const list = typeof vp.listBuildingRots === "function" ? vp.listBuildingRots() : []
+        // 【只排除内置样板，别排除玩家的东西】
+        // pavilion / boat 是插件自带的场景，一直躺在世界里。
+        // 不排除的话，用户点一次固化，凉亭和船就被吞进他的建筑里 ——
+        // 拆的时候跟着消失，图纸里还多出一艘船。
+        //
+        // 但 "user" 绝对不能排除：那是玩家手点放出来的方块，
+        // 正是最该被固化的东西。之前把它和样板一起排除，
+        // 结果玩家搭了 45 块点固化，什么都不弹。
+        const SKIP = new Set(["pavilion", "boat"])
+        const ids = list
+          .map((b) => b.id)
+          .filter((id) => id && !SKIP.has(id) && !id.startsWith("macro:") && !id.startsWith("bp:"))
+        if (!ids.length) {
+          aiLog("固化：世界里没有可合并的建筑（样板凉亭/船不算）")
+          return
+        }
+
+        // 推荐名：取第一栋有意义的名字，否则「建筑-001」
+        // 推荐名：优先用有名字的；只有 user/ai 这种默认值时给「建筑-001」
+        const first = ids.find((id) => !/^(ai$|user$|testbox$|saved$|agent$|pavilion$|boat$|macro:|bp:|整体-)/.test(id))
+        let suggest = first || ""
+        if (!suggest) {
+          let n = 1
+          const taken = new Set((vp.listBlueprints ? vp.listBlueprints() : []).map((b) => b.name))
+          while (taken.has("建筑-" + String(n).padStart(3, "0"))) n++
+          suggest = "建筑-" + String(n).padStart(3, "0")
+        }
+
+        askFuseName(ids, suggest)
+      }
+
+      // 命名框：一个小输入框 + 确定/取消。
+      // 回车 = 确定，Esc = 取消。确定之后才真正合并 + 存图纸。
+      function askFuseName(ids, suggest) {
+        const old = doc.getElementById(IDS.pane + "-fuse")
+        if (old) old.remove()
+
+        const box = doc.createElement("div")
+        box.id = IDS.pane + "-fuse"
+        box.style.cssText = [
+          "position:fixed", "left:50%", "top:50%", "transform:translate(-50%,-50%)",
+          "z-index:2147480100", "padding:18px 20px", "border-radius:16px",
+          "background:rgba(20,24,32,.96)", "color:#fff", "min-width:300px",
+          "border:1px solid #ffffff44", "pointer-events:auto",
+          "font:13px/1.6 system-ui,-apple-system,sans-serif",
+          "backdrop-filter:blur(16px)", "-webkit-backdrop-filter:blur(16px)",
+          "box-shadow:0 12px 40px #00000088",
+        ].join(";")
+
+        const title = doc.createElement("div")
+        title.textContent = "固化并存入图纸仓库"
+        title.style.cssText = "font-weight:700;font-size:14px;margin-bottom:4px"
+        const hint = doc.createElement("div")
+        hint.textContent = "合并 " + ids.length + " 个建筑，起个名字存进仓库"
+        hint.style.cssText = "opacity:.6;font-size:12px;margin-bottom:12px"
+
+        const input = doc.createElement("input")
+        input.type = "text"
+        input.value = suggest
+        input.style.cssText = [
+          "width:100%", "box-sizing:border-box", "height:34px", "padding:0 10px",
+          "border-radius:10px", "border:1px solid #ffffff44",
+          "background:rgba(255,255,255,.08)", "color:#fff",
+          "font:inherit", "outline:none",
+        ].join(";")
+
+        const row = doc.createElement("div")
+        row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:14px"
+
+        const mk = (label, primary) => {
+          const b = doc.createElement("button")
+          b.type = "button"
+          b.textContent = label
+          b.style.cssText = [
+            "height:32px", "padding:0 16px", "border-radius:999px", "cursor:pointer",
+            "font:inherit", "font-weight:700", "font-size:12.5px",
+            primary
+              ? "border:1px solid #d9a93c99;background:#d9a93c22;color:#fff"
+              : "border:1px solid #ffffff44;background:transparent;color:#fff",
+          ].join(";")
+          return b
+        }
+        const ok = mk("固化", true)
+        const cancel = mk("取消", false)
+
+        const finish = (name) => {
+          try { box.remove() } catch (err) { /* 已移除 */ }
+          if (!name) return
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.mergeBuildings !== "function") return
+          // 【和 AI 走同一个函数】
+          // 固化的完整语义（合并 + 存图纸）在引擎的 mergeBuildings 里，
+          // 第三个参数 saveName 传了就连图纸一起存。
+          // 界面这里不再自己调 snapshotBuilding —— 两边各写一遍就会漂移。
+          const r = vp.mergeBuildings(ids, name, name)
+          if (!r || !r.ok) {
+            aiLog("固化失败：" + ((r && r.error) || "unknown"))
+            return
+          }
+          if (r.snapshot && r.snapshot.ok) {
+            aiLog("固化完成：" + name + "（" + r.blocks + " 块），图纸已存入仓库")
+          } else {
+            aiLog("固化完成：" + name + "（" + r.blocks + " 块），但图纸保存失败")
+          }
+          refreshVoxelHud()
+        }
+
+        ok.addEventListener("click", () => finish(String(input.value || "").trim()))
+        cancel.addEventListener("click", () => finish(null))
+        input.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter") { ev.preventDefault(); finish(String(input.value || "").trim()) }
+          else if (ev.key === "Escape") { ev.preventDefault(); finish(null) }
+        })
+
+        row.append(cancel, ok)
+        box.append(title, hint, input, row)
+        doc.body.appendChild(box)
+        try { input.focus(); input.select() } catch (err) { /* 焦点失败不影响 */ }
+      }
+
+      // 重置世界：清存档 + 重新搭样板凉亭
+      function onVoxelReset() {
+        try {
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.resetWorld !== "function") return
+          const n = vp.resetWorld()
+          refreshVoxelHud()
+          if (typeof toast === "function") toast("已重置，重新搭了 " + n + " 块样板")
+        } catch (error) { console.warn("[Open Sea Shelter] reset failed", error) }
+      }
+
+      // 一键拆除：把世界拆干净，砖进仓库。
+      // 不做二次确认 —— 砖不会丢（全在仓库里），所以拆错了可以重新搭。
+      function onVoxelDemolish() {
+        try {
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.demolishAll !== "function") return
+          const s = vp.stats ? vp.stats() : null
+          if (!s || !s.total) return
+          // demolishAll 现在返回 { count, saved } —— 每栋建筑会先存成图纸再拆
+          const r = vp.demolishAll()
+          refreshVoxelHud()
+          if (typeof toast === "function") {
+            const cnt = r && Number.isFinite(r.count) ? r.count : 0
+            const saved = r && r.saved ? r.saved.length : 0
+            toast(saved > 0
+              ? "拆除 " + cnt + " 块，存下 " + saved + " 份图纸"
+              : "拆除 " + cnt + " 块，已收进仓库")
+          }
+        } catch (error) { console.warn("[Open Sea Shelter] demolish failed", error) }
+      }
+
+      function onVoxelCollect() {
+        try {
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.collectBuilding !== "function") return
+          const s = vp.stats ? vp.stats() : null
+          if (!s || !s.total) return
+          vp.collectBuilding("testbox", "测试体")
+          refreshVoxelHud()
+        } catch (error) { console.warn("[Open Sea Shelter] collect failed", error) }
+      }
+
+      function onVoxelPlace() {
+        try {
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.listBlueprints !== "function") return
+          const list = vp.listBlueprints()
+          if (!list.length) return
+          vp.placeBlueprint(list[0].name)
+          refreshVoxelHud()
+        } catch (error) { console.warn("[Open Sea Shelter] place failed", error) }
+      }
+
+      // 刷新动作条的可见性和文字。
+      // 只在「沉浸态 + 方块大陆开着」时显示 —— 其他时候玩家在调参数，
+      // 画面上不该多出两个按钮。
+      function updateVoxelHud() {
+        let want = false
+        try {
+          want = immersive && readSettings().voxelVisible === true
+        } catch (error) { want = false }
+        if (want && !voxelHud) buildVoxelHud()
+        if (!voxelHud) return
+        voxelHud.style.display = want ? "flex" : "none"
+        if (want) refreshVoxelHud()
+      }
+
+      function refreshVoxelHud() {
+        if (!voxelHudStat) return
+        try {
+          const vp = win.__voxelPass
+          if (!vp) { voxelHudStat.style.display = "none"; return }
+          const s = vp.stats ? vp.stats() : null
+          const list = vp.listBlueprints ? vp.listBlueprints() : []
+          const wh = vp.warehouse ? vp.warehouse() : []
+          const parts = []
+          if (s && s.total) parts.push("世界 " + s.total + " 块")
+          // 仓库统计：只显示有存货的材质
+          const stocked = wh.filter((w) => w.count > 0)
+          if (stocked.length) {
+            parts.push("仓库 " + stocked.map((w) => w.name + "×" + w.count).join(" "))
+          }
+          if (list.length) parts.push("蓝图 " + list.length)
+          // 撤销栈深度：让玩家知道「右键还能退几步」
+          const depth = typeof vp.undoDepth === "function" ? vp.undoDepth() : 0
+          if (depth > 0) parts.push("可撤销 " + depth + " 步")
+          const text = parts.join(" · ")
+          voxelHudStat.textContent = text
+          voxelHudStat.style.display = text ? "block" : "none"
+          if (voxelHudCollect) voxelHudCollect.disabled = !(s && s.total)
+          if (voxelHudPlace) voxelHudPlace.disabled = list.length === 0
+          if (voxelHudDemolish) voxelHudDemolish.disabled = !(s && s.total)
+        } catch (error) { /* 忽略 */ }
+      }
+      // ============================================================
+      //  底部物品栏（材质选择 + 放置/删除）
+      // ============================================================
+      // 为什么是「底部横条」而不是面板里的按钮：
+      //   这是沙盒游戏的通用语言 —— 材质在手边一字排开，点一下就选中，
+      //   然后点画面就放。面板是用来调世界参数的，建东西不该把它打开。
+      //
+      // 只在「沉浸态 + 方块大陆开着」时出现，和右上角的收纳条同一个条件。
+      let hotbar = null
+      let hotbarMat = 0            // 当前选中的材质索引
+      let hotbarErase = false      // 删除模式
+      // 这两个必须声明在 buildHotbar 之前：
+      // buildHotbar 内部会往里 push，而 let 有 TDZ ——
+      // 声明放在函数后面的话，第一次调用就 ReferenceError。
+      let matButtons = []
+      let eraseBtn = null
+      // 施工高度：-1 = 自动（落在这一列顶上），0..31 = 固定层。
+      // 和引擎里的 buildY 保持同步，每次改动都 setBuildY 推过去。
+      let buildY = -1
+
+      function buildHotbar() {
+        const wrap = doc.createElement("div")
+        wrap.id = IDS.pane + "-hotbar"
+        wrap.style.cssText = [
+          "position:fixed", "left:50%", "bottom:14px", "transform:translateX(-50%)",
+          "z-index:2147480098", "display:none", "gap:6px", "padding:6px 8px",
+          "border-radius:14px", "pointer-events:auto",
+          "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 82%, transparent)",
+          "border:1px solid #ffffff55",
+          "backdrop-filter:blur(12px)", "-webkit-backdrop-filter:blur(12px)",
+          "box-shadow:0 4px 20px #00000044",
+          "align-items:center",
+        ].join(";")
+
+        let mats = []
+        try {
+          const vp = win.__voxelPass
+          if (vp && typeof vp.materials === "function") mats = vp.materials()
+        } catch (error) { /* 引擎没起来 */ }
+        // 引擎还没起来时用一份本地兜底，保证栏位不空
+        if (!mats.length) {
+          // 和引擎 MATERIALS 保持一致：24 色
+          mats = [
+            { id: 0, name: "红", css: "#e62e33" },
+            { id: 1, name: "黄", css: "#f2c71a" },
+            { id: 2, name: "蓝", css: "#298cf2" },
+            { id: 3, name: "白", css: "#f0f0ea" },
+            { id: 4, name: "橙", css: "#f27a1a" },
+            { id: 5, name: "绿", css: "#33b857" },
+            { id: 6, name: "浅红", css: "#f79e9e" },
+            { id: 7, name: "浅黄", css: "#fae68c" },
+            { id: 8, name: "浅蓝", css: "#99c7fa" },
+            { id: 9, name: "浅绿", css: "#a6e6ad" },
+            { id: 10, name: "深红", css: "#9e1a1f" },
+            { id: 11, name: "深黄", css: "#ad850a" },
+            { id: 12, name: "深蓝", css: "#0d296b" },
+            { id: 13, name: "深绿", css: "#0f5224" },
+            { id: 14, name: "浅棕", css: "#d1ae80" },
+            { id: 15, name: "棕", css: "#734d29" },
+            { id: 16, name: "浅灰", css: "#b8b8b8" },
+            { id: 17, name: "深灰", css: "#616166" },
+            { id: 18, name: "黑", css: "#1a1a1f" },
+            { id: 19, name: "粉", css: "#d98ccc" },
+            { id: 20, name: "青", css: "#26a6ad" },
+            { id: 21, name: "紫", css: "#7347a6" },
+            { id: 22, name: "橄榄", css: "#858c38" },
+            { id: 23, name: "肤色", css: "#e0b89e" },
+          ]
+        }
+
+        const cells = []
+        matButtons = []
+        // 【24 色默认只露出前 6 个】
+        // 全部铺开要 24×34 ≈ 816 像素宽，在 1080p 上几乎占满屏幕下沿，
+        // 而且压住了世界。前 6 个是魔方六色，最常用；
+        // 剩下的收进一个「更多」展开，需要时再打开。
+        const HOTBAR_SHOWN = 6
+        let matExpanded = false
+        const matSpacer = []   // 第 7 个以后，展开时才插进 DOM
+
+        for (let idx = 0; idx < mats.length; idx++) {
+          const m = mats[idx]
+          const b = doc.createElement("button")
+          b.type = "button"
+          b.title = m.name
+          b.dataset.mat = String(m.id)
+          b.style.cssText = [
+            "width:30px", "height:30px", "padding:0", "border-radius:8px", "cursor:pointer",
+            "border:2px solid transparent", "transition:border-color 120ms ease, transform 120ms ease",
+            "background:" + m.css,
+          ].join(";")
+          b.addEventListener("click", () => {
+            hotbarMat = m.id
+            hotbarErase = false
+            refreshHotbar()
+          })
+          matButtons.push(b)
+          if (idx < HOTBAR_SHOWN) {
+            cells.push(b)
+          } else {
+            b.style.display = "none"
+            matSpacer.push(b)
+            cells.push(b)      // 仍然进 cells，只是先不显示
+          }
+        }
+
+        // 展开 / 收起按钮：24 色里后 18 个藏在这里
+        const expand = doc.createElement("button")
+        expand.type = "button"
+        expand.title = "展开全部 24 色"
+        expand.textContent = "＋"
+        expand.style.cssText = [
+          "width:26px", "height:30px", "padding:0", "border-radius:8px", "cursor:pointer",
+          "border:1px solid #ffffff33", "font-size:14px", "font-weight:700",
+          "background:#00000022", "color:inherit",
+        ].join(";")
+        expand.addEventListener("click", () => {
+          matExpanded = !matExpanded
+          for (const b of matSpacer) b.style.display = matExpanded ? "block" : "none"
+          expand.textContent = matExpanded ? "－" : "＋"
+          expand.title = matExpanded ? "收起（只留 6 个常用色）" : "展开全部 24 色"
+          refreshHotbar()
+        })
+
+        // 分隔线
+        const sep = doc.createElement("div")
+        sep.style.cssText = "width:1px;height:22px;background:#88888855;margin:0 2px"
+
+        // 删除工具
+        const erase = doc.createElement("button")
+        erase.type = "button"
+        erase.title = "删除（点方块挖掉）"
+        erase.textContent = "挖"
+        erase.style.cssText = [
+          "width:30px", "height:30px", "padding:0", "border-radius:8px", "cursor:pointer",
+          "border:2px solid transparent", "font-size:12px", "font-weight:700",
+          "background:#00000022", "color:inherit",
+        ].join(";")
+        erase.addEventListener("click", () => {
+          hotbarErase = !hotbarErase
+          refreshHotbar()
+        })
+        eraseBtn = erase
+
+        // 【这里不能再引用 level】
+        // 原来末尾有个「施工高度指示」，永远显示「自动」，没有点击入口，
+        // 是块死文字 —— 已经删掉。但删定义时漏了这里的引用，
+        // level 成了 undefined，append 直接抛错，整条物品栏都渲染不出来。
+        // 表现就是「下面的颜色框框怎么没了」。
+        wrap.append(...cells, expand, sep, erase)
+        doc.body.appendChild(wrap)
+        hotbar = wrap
+        refreshHotbar()
+      }
+
+      function refreshHotbar() {
+        for (const b of matButtons) {
+          const id = Number(b.dataset.mat)
+          const on = !hotbarErase && id === hotbarMat
+          b.style.borderColor = on ? "#d9a93c" : "transparent"
+          b.style.transform = on ? "translateY(-2px)" : ""
+        }
+        if (eraseBtn) {
+          eraseBtn.style.borderColor = hotbarErase ? "#d9a93c" : "transparent"
+          eraseBtn.style.transform = hotbarErase ? "translateY(-2px)" : ""
+        }
+      }
+
+      // 设定施工高度并同步给引擎。
+      // -1 = 自动；0..31 = 固定在某一层。
+      function setBuildY(y) {
+        buildY = y < 0 ? -1 : Math.max(0, Math.min(31, y | 0))
+        try {
+          const vp = win.__voxelPass
+          if (vp && typeof vp.setBuildY === "function") vp.setBuildY(buildY)
+        } catch (error) { /* 引擎没起来 */ }
+        refreshHotbar()
+      }
+
+      function updateHotbar() {
+        let want = false
+        try {
+          want = immersive && readSettings().voxelVisible === true
+        } catch (error) { want = false }
+        if (want && !hotbar) buildHotbar()
+        if (!hotbar) return
+        hotbar.style.display = want ? "flex" : "none"
+      }
+
+      // ============================================================
+      //  建造交互：点击 / 拖拽 / 右键删除 + 反馈
+      // ============================================================
+      // 这是「用户体验」的核心，自己搭过房子之后补出来的几件事：
+      //
+      //   · 原来只用 click —— 想铺一片地板得点几十下。
+      //     现在按住左键拖动，经过的每一格都会放一块（MC 的铺法）。
+      //   · 原来放置失败完全没反馈。现在：
+      //       点中了但那一列满了 → 提示"这一列到顶了"
+      //       没点中地面（点到天上去了）→ 静默（这是正常的，不该报警）
+      //   · 原来删除要先点「挖」按钮再点方块，太绕。
+      //     现在右键点方块直接删，左键放、右键删，符合沙盒习惯。
+      //   · 材质索引越界（比如以后面板传来 99）现在被夹到合法范围，
+      //     不会静默画成白玉。
+      //
+      // 事件分工（重要，别改乱）：
+      //   pointerdown/move/up  —— 建造拖拽，用【冒泡】阶段
+      //   click                —— 不用了（拖拽已经把单击包含了）
+      //   壁纸模式那套点鱼/点地面用的是 document 的【捕获】阶段，
+      //   它在冒泡之前跑，且只在没点中 UI 时才起作用 —— 两边不冲突。
+
+      let buildDragging = false
+      let lastPlacedKey = ""
+
+      function canBuild(e) {
+        if (!immersive) return false
+        try { if (readSettings().voxelVisible !== true) return false } catch (error) { return false }
+        if (!e) return false
+        if (e.target && e.target.closest && e.target.closest(
+          "button, input, .oss-panel, .oss-subpanel, #" + IDS.pane + "-hotbar, #" + IDS.pane + "-voxel-hud"
+        )) return false
+        return true
+      }
+
+      // 夹到合法材质范围。越界时按白玉处理并提醒一次。
+      function safeMat(m) {
+        const v = Number(m)
+        if (!Number.isInteger(v) || v < 0 || v > 11) {
+          toast("材质无效，已用白玉代替")
+          return 0
+        }
+        return v
+      }
+
+      // 极简提示条：出现在画面上部中间，1.2 秒后自己消失。
+      // 不做队列、不堆叠 —— 同一时刻只会有一条，新的覆盖旧的。
+      // 建造反馈不需要历史记录，用户要的是"我刚才那一下成了没有"。
+      let toastEl = null
+      let toastTimer = 0
+      function toast(text) {
+        if (!text) return
+        if (!toastEl) {
+          toastEl = doc.createElement("div")
+          toastEl.style.cssText = [
+            "position:fixed", "left:50%", "top:64px", "transform:translateX(-50%)",
+            "z-index:2147480100", "pointer-events:none",
+            "padding:6px 14px", "border-radius:999px",
+            "font:inherit", "font-size:12px", "font-weight:600", "letter-spacing:.3px",
+            "background:#000000cc", "color:#fff", "white-space:nowrap",
+            "opacity:0", "transition:opacity 160ms ease",
+          ].join(";")
+          doc.body.appendChild(toastEl)
+        }
+        toastEl.textContent = text
+        toastEl.style.opacity = "1"
+        if (toastTimer) win.clearTimeout(toastTimer)
+        toastTimer = win.setTimeout(() => {
+          if (toastEl) toastEl.style.opacity = "0"
+          toastTimer = 0
+        }, 1200)
+      }
+
+      function doPlaceAt(clientX, clientY, mat) {
+        try {
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.placeAt !== "function") return false
+          const r = vp.placeAt(clientX, clientY, mat, "user")
+          if (r) {
+            lastPlacedKey = r.x + "," + r.y + "," + r.z
+            refreshVoxelHud()
+            return true
+          }
+          // 失败分两种，只有一种是用户需要知道的：
+          //   能拾取到地面但放不上去 → 这一列到顶了（32 层）
+          //   拾取不到地面          → 点到天上去了，正常，不提示
+          if (typeof vp.pick === "function" && vp.pick(clientX, clientY)) {
+            toast("这一列到顶了（32 层）")
+          }
+          return false
+        } catch (error) { return false }
+      }
+
+      function doRemoveAt(clientX, clientY) {
+        try {
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.removeAt !== "function") return false
+          const r = vp.removeAt(clientX, clientY)
+          if (r) { refreshVoxelHud(); return true }
+          return false
+        } catch (error) { return false }
+      }
+
+      // ---- 左键：按下即放，拖动连放 ----
+      // 三种建法，从慢到快：
+      //   ① 单击 / 拖动        —— 一块一块放（精修用）
+      //   ② Shift + 拖框       —— 一片平面一次填满（屋顶、地板）
+      //   ③ Alt + 拖框         —— 一片立方体一次填满（柱子、墙体）
+      // ② 和 ③ 的差别是「一层的面」和「有高度的体」，后者是盖柱子/墙的关键。
+      let regionStart = null
+      let regionMode = ""        // "flat" = 平面， "solid" = 立方体
+      let regionEl = null
+      // 防误触：按下后必须真的移动超过这个像素数才算「拖动」
+      const DRAG_THRESHOLD = 4
+      let dragStartX = 0
+      let dragStartY = 0
+      let dragMoved = false
+
+      function showRegionBox(x1, y1, x2, y2) {
+        if (!regionEl) {
+          regionEl = doc.createElement("div")
+          regionEl.style.cssText = [
+            "position:fixed", "z-index:2147480101", "pointer-events:none",
+            "border:1px dashed #d9a93c", "background:#d9a93c22", "border-radius:2px",
+          ].join(";")
+          doc.body.appendChild(regionEl)
+        }
+        regionEl.style.display = "block"
+        regionEl.style.left = Math.min(x1, x2) + "px"
+        regionEl.style.top = Math.min(y1, y2) + "px"
+        regionEl.style.width = Math.abs(x2 - x1) + "px"
+        regionEl.style.height = Math.abs(y2 - y1) + "px"
+      }
+      function hideRegionBox() {
+        if (regionEl) regionEl.style.display = "none"
+      }
+
+      // ============================================================
+      //  拖拽旋转建筑
+      // ============================================================
+      // 按住一栋楼左右拖 = 这栋楼绕自己的竖轴转，世界不动。
+      //
+      // 【怎么和「放置方块」区分】
+      // 按下时先问引擎：这个点在哪栋楼上？
+      //   在建筑上 → 进入旋转模式，整个拖动过程不放任何方块
+      //   不在建筑上 → 走原来的放置/挖除逻辑
+      // 所以拖建筑旋转、拖空地盖房子，是同一个左键的两个分支。
+      //
+      // 【为什么每拖 90px 才转一档】
+      // 转一格就响太灵敏，手一抖就转过去了。
+      // 90px 大约是屏幕上半个建筑宽度，拖起来跟手。
+      const ROT_DRAG_PX = 90
+      let rotateTarget = null        // 正在旋转的 buildId
+      let rotateStartX = 0
+      let rotateBaseRot = 0
+      let rotateLastStep = 0
+
+      // ============================================================
+      //  拖拽移动建筑
+      // ============================================================
+      // 按住 Ctrl + 左键拖一栋楼 = 这栋楼在地面上平移。
+      //
+      // 为什么不和旋转共用左键：
+      //   同一栋楼上「左右拖」和「上下拖」都是很自然的动作，靠方向猜意图不可靠。
+      //   给移动单独一个修饰键，两件事就不会打架。
+      //
+      // 拖拽期间**不实时改数据**，只在松手时一次性落位 ——
+      // 实时改的话每移动一像素就要遍历几百块方块，必然卡。
+      // 拖的时候只画一个跟随的提示，松手才真正搬。
+      // 【不用固定的「每像素多少格」】
+      // 原来写死 0.25 格/像素，结果拖一小段就飞出很远 ——
+      // 因为那个值比屏幕实际对应的比例大好几倍，而且视角一变就不准。
+      //
+      // 现在改成【按世界坐标算】：
+      //   按下时记起点对应的地面格，松开时记终点对应的地面格，
+      //   两者之差就是移动量。拖多少像素就走多少，和眼睛看到的一致。
+      let moveTarget = null
+      let moveStartX = 0
+      let moveStartY = 0
+      let moveStartCell = null       // 按下时对应的地面格 {x, z}
+      let moveDragging = false
+
+      function tryBeginMove(e) {
+        const vp = win.__voxelPass
+        if (!vp || typeof vp.pickBuilding !== "function") return false
+        let hit = null
+        try { hit = vp.pickBuilding(e.clientX, e.clientY) } catch (error) { return false }
+        if (!hit || !hit.building) return false
+        moveTarget = hit.building
+        moveStartX = e.clientX
+        moveStartY = e.clientY
+        // 记下起点对应的地面格 —— 后面用「终点格 - 起点格」算位移，
+        // 这样灵敏度天然和视角一致，不用调任何常数。
+        moveStartCell = hit.cell ? { x: hit.cell.x, z: hit.cell.z } : null
+        moveDragging = false
+        toast("抓住 " + hit.building + "，拖动搬到别处")
+        return true
+      }
+
+      function updateMove(e) {
+        if (!moveTarget) return
+        const dx = e.clientX - moveStartX
+        const dy = e.clientY - moveStartY
+        // 超过阈值才算真的在拖
+        if (!moveDragging && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return
+        moveDragging = true
+      }
+
+      function endMove(e) {
+        if (!moveTarget) return false
+        const bid = moveTarget
+        const moved = moveDragging
+        moveTarget = null
+        moveDragging = false
+        if (!moved) return true
+
+        // 松手才落位。
+        // 【位移 = 终点地面格 - 起点地面格】
+        // 不再用「像素 × 常数」，而是真的问引擎：松手这个屏幕点对应哪个格子。
+        // 于是拖多少像素就走多少，不同缩放下手感一致。
+        let dxCell = 0
+        let dzCell = 0
+        try {
+          const vp2 = win.__voxelPass
+          if (vp2 && typeof vp2.pick === "function" && moveStartCell && e) {
+            const endCell = vp2.pick(e.clientX, e.clientY)
+            if (endCell) {
+              dxCell = endCell.x - moveStartCell.x
+              dzCell = endCell.z - moveStartCell.z
+            }
+          }
+        } catch (error) { /* 拾取失败就当没移动 */ }
+        moveStartCell = null
+        if (dxCell === 0 && dzCell === 0) { toast("没移动"); return true }
+
+        try {
+          const vp = win.__voxelPass
+          if (vp && typeof vp.canMoveBuilding === "function") {
+            const chk = vp.canMoveBuilding(bid, dxCell, dzCell)
+            if (chk && !chk.ok) {
+              toast("搬不动：超出世界边界")
+              return true
+            }
+          }
+          if (vp && typeof vp.setBuildingOffset === "function") {
+            const r = vp.setBuildingOffset(bid, dxCell, dzCell)
+            if (r && r.ok) toast(bid + " 移动 " + dxCell + "," + dzCell + " 格")
+            else toast("移动失败: " + ((r && r.error) || "未知"))
+          }
+        } catch (error) {
+          toast("移动抛错: " + (error && error.message ? error.message : error))
+        }
+        return true
+      }
+
+      // ============================================================
+      //  旋转 / 移动的修饰键
+      // ============================================================
+      // 用户的原话：「左键是点键，点方块给用户造件作用。
+      // 现在左键如果点到建筑上，直接变成旋转了。」
+      //
+      // 所以：左键永远只用于建造，不再抢。
+      // 要旋转或移动，必须先按住 R 或 M 再拖：
+      //   R + 左键拖建筑  → 旋转
+      //   M + 左键拖建筑  → 移动
+      // 按 R/M 的时候给个提示，让人知道现在进入了哪个模式。
+      let keyR = false
+      let keyM = false
+
+      function onModKeyDown(e) {
+        // 输入框里打字时不要抢键
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : ''
+        if (tag === 'input' || tag === 'textarea') return
+        if (e.target && e.target.isContentEditable) return
+        if (e.key === 'r' || e.key === 'R') {
+          if (!keyR) { keyR = true; toast('R：拖建筑旋转') }
+        } else if (e.key === 'm' || e.key === 'M') {
+          if (!keyM) { keyM = true; toast('M：拖建筑移动') }
+        }
+      }
+
+      function onModKeyUp(e) {
+        if (e.key === 'r' || e.key === 'R') keyR = false
+        if (e.key === 'm' || e.key === 'M') keyM = false
+      }
+
+      // 窗口失焦时清掉，否则「按着 R 切出去再回来」会一直以为在按
+      function onModBlur() { keyR = false; keyM = false }
+
+      function tryBeginRotate(e) {
+        const vp = win.__voxelPass
+        if (!vp) { return false }
+        if (typeof vp.pickBuilding !== "function") {
+          // 【这句一定要看得见】
+          // 引擎没更新到带 pickBuilding 的版本时，这里会静默返回 false，
+          // 用户看到的现象就是「转了没反应」—— 和「点空了」分不开。
+          toast("引擎未更新：缺少 pickBuilding")
+          return false
+        }
+        let hit = null
+        try { hit = vp.pickBuilding(e.clientX, e.clientY) } catch (error) {
+          toast("拾取失败: " + (error && error.message ? error.message : error))
+          return false
+        }
+        if (!hit) {
+          toast("拾取返回空（可能没打到地面）")
+          return false
+        }
+        if (!hit.building) {
+          // 点到了空地。不弹提示 —— 那是正常操作（要盖房子）。
+          return false
+        }
+        rotateTarget = hit.building
+        rotateStartX = e.clientX
+        rotateBaseRot = hit.rotY || 0
+        rotateLastStep = 0
+        toast("抓住 " + hit.building + "，左右拖旋转")
+        return true
+      }
+
+      function updateRotate(e) {
+        if (!rotateTarget) return
+        const dx = e.clientX - rotateStartX
+        const step = Math.round(dx / ROT_DRAG_PX)
+        if (step === rotateLastStep) return
+        rotateLastStep = step
+        // 往右拖 = 顺时针（角度增加），往左拖 = 逆时针
+        const next = rotateBaseRot + step * 90
+        try {
+          const vp = win.__voxelPass
+          if (vp && typeof vp.setBuildingRot === "function") {
+            const r = vp.setBuildingRot(rotateTarget, next)
+            if (r && r.ok) {
+              if (step !== 0) toast(rotateTarget + " · " + r.rotY + "°")
+            } else {
+              toast("旋转失败: " + ((r && r.error) || "未知"))
+            }
+          } else {
+            toast("引擎缺少 setBuildingRot")
+          }
+        } catch (error) {
+          toast("旋转抛错: " + (error && error.message ? error.message : error))
+        }
+      }
+
+      function endRotate() {
+        if (!rotateTarget) return false
+        rotateTarget = null
+        rotateLastStep = 0
+        return true
+      }
+
+      function onBuildDown(e) {
+        if (e.button !== 0) return
+        if (!canBuild(e)) return
+        // 【先问：这是不是点在建筑上？】
+        // 在建筑上 → 接管为「拖拽旋转」，不放方块。
+        // 这样「拖楼转圈」和「拖地盖房」共用左键，不会互相干扰。
+        // Alt/Shift 框选优先 —— 那是明确的批量操作意图。
+        // 【左键只建造】除非按住了 R 或 M。
+        // 这是用户明确要求的：左键点到建筑上不应该变成旋转。
+        if (!e.altKey && !e.shiftKey) {
+          if (keyM) {
+            if (tryBeginMove(e)) { e.preventDefault(); return }
+            toast('M 模式下要按住一栋建筑')
+          } else if (keyR) {
+            if (tryBeginRotate(e)) { e.preventDefault(); return }
+            toast('R 模式下要按住一栋建筑')
+          }
+        }
+        // Alt + 拖动 = 立方体（有高度）；Shift + 拖动 = 平面（一层）
+        // 两个都按住时 Alt 优先 —— 立方体包含平面，不需要再组合。
+        if (e.altKey || e.shiftKey) {
+          regionStart = { x: e.clientX, y: e.clientY }
+          regionMode = e.altKey ? "solid" : "flat"
+          showRegionBox(e.clientX, e.clientY, e.clientX, e.clientY)
+          e.preventDefault()
+          return
+        }
+        buildDragging = true
+        lastPlacedKey = ""
+        // 【防误触：拖拽必须真的移动一段距离】
+        // 用户反馈「稍微点重一点就连续放两三块」——原因是 pointerdown 立刻放一块，
+        // 手指（或鼠标）轻微抖动就触发了 pointermove 又放一块。
+        // 现在：按下时只记录起点，真正移动超过阈值（4px）才放第一块；
+        // 如果到 pointerup 都没超过阈值，当成「单击」放一块。
+        dragStartX = e.clientX
+        dragStartY = e.clientY
+        dragMoved = false
+        // 开始一个撤销步：整个拖动过程算一步
+        try {
+          const vp = win.__voxelPass
+          if (vp && typeof vp.undoBegin === "function") vp.undoBegin()
+        } catch (error) { /* 忽略 */ }
+        e.preventDefault()
+      }
+
+      function onBuildMove(e) {
+        // 移动进行中：只记状态，不碰方块（松手才落位）
+        if (moveTarget) {
+          updateMove(e)
+          return
+        }
+        // 旋转进行中：只转建筑，不碰方块
+        if (rotateTarget) {
+          updateRotate(e)
+          return
+        }
+        // 框选进行中：只画框，不落块
+        if (regionStart) {
+          showRegionBox(regionStart.x, regionStart.y, e.clientX, e.clientY)
+          return
+        }
+        if (!buildDragging) return
+        if (!canBuild(e)) return
+
+        // 先看有没有真的移动过阈值
+        const dx = e.clientX - dragStartX
+        const dy = e.clientY - dragStartY
+        if (!dragMoved) {
+          if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return
+          dragMoved = true
+          // 刚越过阈值：先把起点那一格放下去，再接下去连放
+          doPlaceAt(dragStartX, dragStartY, hotbarErase ? 0 : safeMat(hotbarMat))
+          lastPlacedKey = ""
+        }
+
+        // 同一格不重复放（否则拖一下就叠一片）
+        try {
+          const vp = win.__voxelPass
+          if (vp && typeof vp.pick === "function") {
+            const g = vp.pick(e.clientX, e.clientY)
+            if (!g) return
+            const k = g.x + "," + g.z
+            if (k === lastPlacedKey) return
+            lastPlacedKey = k
+          }
+        } catch (error) { /* 忽略 */ }
+        if (hotbarErase) doRemoveAt(e.clientX, e.clientY)
+        else doPlaceAt(e.clientX, e.clientY, safeMat(hotbarMat))
+      }
+
+      function onBuildUp(e) {
+        // 移动结束：到这里才真正落位
+        if (endMove(e)) {
+          e.preventDefault()
+          return
+        }
+        // 旋转结束：角度已经在拖动过程中落地了，这里只收拾状态
+        if (endRotate()) {
+          e.preventDefault()
+          return
+        }
+        // 框选结束：一次填满这片区域
+        if (regionStart) {
+          const a = regionStart
+          const mode = regionMode
+          regionStart = null
+          regionMode = ""
+          hideRegionBox()
+          try {
+            const vp = win.__voxelPass
+            if (!vp) return
+            const mat = hotbarErase ? 0 : safeMat(hotbarMat)
+            // 整个框选算一个撤销步
+            if (typeof vp.undoBegin === "function") vp.undoBegin()
+
+            if (hotbarErase) {
+              // 删除：平面模式挖一层，立方体模式也先按平面挖（够用）
+              if (typeof vp.clearRect === "function") {
+                const r = vp.clearRect(a.x, a.y, e.clientX, e.clientY)
+                if (r && r.error === "too_big") toast("区域太大（上限 4096 格）")
+                else if (r && r.count) toast("清掉 " + r.count + " 块")
+              }
+              if (typeof vp.undoEnd === "function") vp.undoEnd()
+              refreshVoxelHud()
+              return
+            }
+
+            if (mode === "solid") {
+              // 立方体：从当前施工高度往上立 height 层
+              if (typeof vp.fillSolid === "function") {
+                const h = Math.max(1, buildY < 0 ? 1 : 4)   // 默认立 4 层
+                const r = vp.fillSolid(a.x, a.y, e.clientX, e.clientY, h, mat, "user")
+                if (r && r.error === "too_big") toast("区域太大，请缩小范围")
+                else if (r && r.count) toast("立柱 " + r.count + " 块")
+                else if (!r) toast("框到了画面外")
+              }
+              if (typeof vp.undoEnd === "function") vp.undoEnd()
+              refreshVoxelHud()
+              return
+            }
+
+            // 平面
+            if (typeof vp.fillRect === "function") {
+              const r = vp.fillRect(a.x, a.y, e.clientX, e.clientY, mat, "user")
+              if (r && r.error === "too_big") toast("区域太大（上限 4096 格），请缩小范围")
+              else if (r && r.count) toast("填充 " + r.count + " 块")
+              else if (!r) toast("框到了画面外，没落在底板上")
+            }
+            if (typeof vp.undoEnd === "function") vp.undoEnd()
+            refreshVoxelHud()
+          } catch (error) { console.warn("[Open Sea Shelter] region fill failed", error) }
+          return
+        }
+
+        // 普通按下：如果到最后都没移动过阈值，当成单击，放一块
+        if (buildDragging) {
+          if (!dragMoved) {
+            doPlaceAt(e.clientX, e.clientY, hotbarErase ? 0 : safeMat(hotbarMat))
+          }
+          // 提交这一整次拖动为一个撤销步
+          try {
+            const vp = win.__voxelPass
+            if (vp && typeof vp.undoEnd === "function") vp.undoEnd()
+          } catch (error) { /* 忽略 */ }
+          refreshVoxelHud()
+        }
+        buildDragging = false
+        dragMoved = false
+        lastPlacedKey = ""
+      }
+
+      // ---- 右键：撤销上一步 ----
+      // 【不再只是「挖掉点中的那一块」】
+      // 用户说得很准：鼠标太灵敏，稍微拖一下就连着放好几块，
+      // 而之前只能一块块挖掉 —— 放着容易、拆着费劲。
+      // 现在右键 = 撤销上一步操作（一次拖动 / 一次框选 / 一次点击，都只算一步）。
+      // 想挖单块仍然可以用物品栏的「挖」按钮，或者按住右键点具体位置。
+      function onBuildContextMenu(e) {
+        if (!canBuild(e)) return
+        e.preventDefault()
+        doUndo()
+      }
+
+      // 撤销一步 + 提示
+      function doUndo() {
+        try {
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.undo !== "function") return
+          const r = vp.undo()
+          refreshVoxelHud()
+          if (!r) {
+            toast("没有可撤销的操作了")
+            return
+          }
+          toast("撤销了 " + r.count + " 块" + (r.remaining ? "" : "（已到最前）"))
+        } catch (error) { console.warn("[Open Sea Shelter] undo failed", error) }
+      }
+
+      // Ctrl+Z 也撤销（常规习惯）
+      function onUndoKey(e) {
+        if (!immersive) return
+        try { if (readSettings().voxelVisible !== true) return } catch (error) { return }
+        if (e.target && e.target.closest && e.target.closest("input, textarea")) return
+        if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+          e.preventDefault()
+          doUndo()
+        }
+      }
+      doc.addEventListener("keydown", onUndoKey)
+
+      doc.addEventListener("keydown", onModKeyDown)
+doc.addEventListener("keyup", onModKeyUp)
+win.addEventListener("blur", onModBlur)
+doc.addEventListener("pointerdown", onBuildDown)
+      doc.addEventListener("pointermove", onBuildMove)
+      doc.addEventListener("pointerup", onBuildUp)
+      doc.addEventListener("pointercancel", onBuildUp)
+      doc.addEventListener("contextmenu", onBuildContextMenu)
+
+      // ---- 施工高度：PageUp / PageDown ----
+      // 为什么不用滚轮：滚轮已经是相机推拉，抢了会毁掉观察手感。
+      // 为什么不用上下箭头：那是移动鱼的键。
+      // PageUp 抬一层、PageDown 降一层，降到 -1 以下就是「自动」。
+      const onBuildYKey = (e) => {
+        if (!immersive) return
+        try { if (readSettings().voxelVisible !== true) return } catch (error) { return }
+        if (e.target && e.target.closest && e.target.closest("input, textarea")) return
+        if (e.key === "PageUp") {
+          e.preventDefault()
+          setBuildY(buildY < 0 ? 0 : buildY + 1)
+        } else if (e.key === "PageDown") {
+          e.preventDefault()
+          // 从 0 再往下就是自动
+          setBuildY(buildY <= 0 ? -1 : buildY - 1)
+        }
+      }
+      doc.addEventListener("keydown", onBuildYKey)
+
+      // ============================================================
+      //  AI 建造台（世界里的输入框）
+      // ============================================================
+      // 和底部物品栏并列的第二种建造方式：
+      //   物品栏 = 人一块一块手搭
+      //   这里   = AI 吐一句话，解析器展开，方块一帧帧长出来
+      //
+      // 为什么放在世界里而不是面板里：
+      //   发指令的时候得能看见世界。面板一开就挡住画面，
+      //   而且执行过程中进度条要一直看得见。
+      //
+      // 这是补丁 9 说的「只给一个文本输入框，其余交给解析器」。
+
+      // ============================================================
+      //  世界里的按钮条（不再是「面板」）
+      // ============================================================
+      // 用户说得对：不需要一个带边框的面板把按钮包起来，
+      // 就是几个独立按钮贴在左下角。
+      //
+      // 三个按钮：
+      //   [创世]     肥鱼创世 —— 开一个创世对话
+      //   [看世界]   进出沉浸模式
+      //   [?]        说明书 —— 弹出全部操作说明
+      //
+      // 【左键还给「建造」】
+      // 之前左键点到建筑上会直接变成旋转，把用户点方块建造的动作抢走了。
+      // 现在旋转和移动都要先按一个键（或点一个按钮）才生效，
+      // 平时左键就是点方块。
+      let aiPanel = null
+      let aiProgEl = null
+      let aiLogEl = null
+      let aiProgTimer = 0
+
+      // 当前操作模式：''=正常建造，'rotate'=拖建筑旋转，'move'=拖建筑移动
+      let opMode = ''
+
+      function buildAiPanel() {
+        // 外层只是一个透明的定位容器，没有任何视觉（无边框无背景）
+        const wrap = doc.createElement("div")
+        wrap.id = IDS.pane + "-ai"
+        wrap.style.cssText = [
+          "position:fixed", "left:14px", "bottom:14px", "z-index:2147480098",
+          "display:none", "flex-direction:column", "gap:6px", "align-items:flex-start",
+          "pointer-events:none",
+        ].join(";")
+
+        // 一行按钮
+        const row = doc.createElement("div")
+        row.style.cssText = "display:flex;gap:6px;align-items:center;pointer-events:auto"
+
+        const mkBtn = (label, tip, primary) => {
+          const b = doc.createElement("button")
+          b.type = "button"
+          b.textContent = label
+          b.title = tip
+          b.style.cssText = [
+            "height:30px", "padding:0 14px", "border-radius:999px", "cursor:pointer",
+            "font:inherit", "font-size:12px", "font-weight:700", "letter-spacing:.4px",
+            "backdrop-filter:blur(12px)", "-webkit-backdrop-filter:blur(12px)",
+            primary
+              ? "border:1px solid #d9a93c99;background:#d9a93c22;color:inherit"
+              : "border:1px solid #ffffff55;background:rgba(20,24,32,.55);color:#fff",
+          ].join(";")
+          return b
+        }
+
+        const create = mkBtn("创世", "开一个创世对话，让 AI 接管这个世界", true)
+        create.className = "oss-ai-create"
+        create.addEventListener("click", onCreate)
+
+        const talk = mkBtn("看世界", "进出沉浸模式", false)
+        talk.className = "oss-ai-talk"
+        talk.textContent = immersive ? "看世界" : "回到世界"
+        talk.addEventListener("click", goTalk)
+
+        const help = mkBtn("说明书", "操作说明与快捷键", false)
+        help.addEventListener("click", showHelp)
+
+        // 图片通道：把照片变成方块像素画
+        const imgBtn = mkBtn("图片", "把图片变成方块", false)
+        imgBtn.addEventListener("click", buildImagePanel)
+
+        // 攻略：收集到的建造方法、踩过的坑，都往这里放。
+        // 存在 localStorage 里（和图纸一样），程序退出不会丢。
+        const guideBtn = mkBtn("攻略", "建造攻略与经验，长期保存", false)
+        guideBtn.addEventListener("click", showGuideBook)
+
+        row.append(create, talk, help, imgBtn, guideBtn)
+
+        // 进度 + 日志：只在有东西可显示时才有高度
+        const prog = doc.createElement("div")
+        prog.style.cssText = [
+          "display:none", "pointer-events:none",
+          "font:inherit", "font-size:11px", "color:#fff",
+          "padding:2px 8px", "border-radius:999px",
+          "background:rgba(20,24,32,.5)",
+        ].join(";")
+
+        const log = doc.createElement("div")
+        log.style.cssText = [
+          "display:none", "pointer-events:none", "max-width:300px",
+          "font:inherit", "font-size:10.5px", "line-height:1.5",
+          "color:#fff", "padding:4px 8px", "border-radius:8px",
+          "background:rgba(20,24,32,.5)", "white-space:pre-wrap",
+          "font-family:ui-monospace,Consolas,monospace",
+        ].join(";")
+
+        wrap.append(row, prog, log)
+        doc.body.appendChild(wrap)
+
+        aiPanel = wrap
+        aiProgEl = prog
+        aiLogEl = log
+        syncTalkButton()
+      }
+
+
+      // ============================================================
+      //  图片通道：左进右出
+      // ============================================================
+      //
+      // 左：用户把图片拖进来（或点击选择）
+      // 右：显示转换后的 24 色方块预览
+      //
+      // 右出口给三个动作：
+      //   复制  —— 把预览图放进剪贴板，用户 Ctrl+V 贴进对话框，AI 就看到
+      //   下载  —— 存成 PNG 文件
+      //   建到世界 —— 直接调 voxel_image，不需要 AI 参与
+      //
+      // 【为什么复制最重要】
+      // 这是唯一一条「用户点一下、AI 就能看到」的路。
+      // 上传和下载都要离开页面，只有剪贴板粘贴是原地完成的。
+
+      const IMG_PALETTE = [
+        [0xe6, 0x2e, 0x33], [0xf2, 0xc7, 0x1a], [0x29, 0x8c, 0xf2], [0xf0, 0xf0, 0xea],
+        [0xf2, 0x7a, 0x1a], [0x33, 0xb8, 0x57], [0xf7, 0x9e, 0x9e], [0xfa, 0xe6, 0x8c],
+        [0x99, 0xc7, 0xfa], [0xa6, 0xe6, 0xad], [0x9e, 0x1a, 0x1f], [0xad, 0x85, 0x0a],
+        [0x0d, 0x29, 0x6b], [0x0f, 0x52, 0x24], [0xd1, 0xae, 0x80], [0x73, 0x4d, 0x29],
+        [0xb8, 0xb8, 0xb8], [0x61, 0x61, 0x66], [0x1a, 0x1a, 0x1f], [0xd9, 0x8c, 0xcc],
+        [0x26, 0xa6, 0xad], [0x73, 0x47, 0xa6], [0x85, 0x8c, 0x38], [0xe0, 0xb8, 0x9e],
+      ]
+
+
+      // 最近邻：把一个 RGB 映射到 24 色里的某一个
+      function imgNearest(r, g, b) {
+        let best = 0
+        let bd = Infinity
+        for (let i = 0; i < IMG_PALETTE.length; i++) {
+          const p2 = IMG_PALETTE[i]
+          const d = (r - p2[0]) ** 2 + (g - p2[1]) ** 2 + (b - p2[2]) ** 2
+          if (d < bd) { bd = d; best = i }
+        }
+        return best
+      }
+
+      // ---- 面板 ----
+      // ============================================================
+      //  图片通道：三个框 + 两条出口
+      // ============================================================
+      //
+      //   左框  原图（拖进来）
+      //   中框  背景层（自动抠出，完整的矩形）
+      //   右框  抠图层（自动抠出，只有人物形状）
+      //
+      //   下面两条出口：
+      //     0 token 建平面  → 只搭一层墙
+      //     0 token 建立体  → 背景墙 + 前面紧贴一层抠图，默认间距 1 格
+      //
+      // 【抠图为什么不用 AI】
+      // 原则零。从四条边检测背景色、洪水填充、连通区域才算背景 —— 纯数组操作。
+      // 零 token，且不会算错。
+
+      let imgSrc = null
+      let imgMask = null      // Uint8Array，1 = 背景
+      let imgBgCanvas = null  // 背景层 canvas
+      let imgFgCanvas = null  // 抠图层 canvas（带 alpha）
+      let imgW = 0
+      let imgH = 0
+
+      // 从四条边找背景色（取前两名）
+      function detectBgColors(imgData, w, h) {
+        const counts = new Map()
+        const add = (x, y) => {
+          const i = (y * w + x) * 4
+          const key = (imgData[i] << 16) | (imgData[i + 1] << 8) | imgData[i + 2]
+          counts.set(key, (counts.get(key) || 0) + 1)
+        }
+        for (let x = 0; x < w; x++) { add(x, 0); add(x, h - 1) }
+        for (let y = 0; y < h; y++) { add(0, y); add(w - 1, y) }
+        return [...counts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 2)
+          .map(([k]) => [(k >> 16) & 255, (k >> 8) & 255, k & 255])
+      }
+
+      // 洪水填充出背景蒙版
+      function buildMask(imgData, w, h, bgColors, tol) {
+        const mask = new Uint8Array(w * h)
+        if (!bgColors.length) return mask
+        const matches = (p) => {
+          const i = p * 4
+          const r = imgData[i], g = imgData[i + 1], b = imgData[i + 2]
+          for (const c of bgColors) {
+            if (Math.abs(r - c[0]) + Math.abs(g - c[1]) + Math.abs(b - c[2]) <= tol) return true
+          }
+          return false
+        }
+        const queue = new Int32Array(w * h)
+        let head = 0
+        let tail = 0
+        const seed = (p) => {
+          if (mask[p]) return
+          if (!matches(p)) return
+          mask[p] = 1
+          queue[tail++] = p
+        }
+        for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x) }
+        for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1) }
+        while (head < tail) {
+          const p = queue[head++]
+          const x = p % w
+          const y = (p - x) / w
+          if (x > 0) seed(p - 1)
+          if (x < w - 1) seed(p + 1)
+          if (y > 0) seed(p - w)
+          if (y < h - 1) seed(p + w)
+        }
+        return mask
+      }
+
+      // 把原图拆成两张 canvas
+      function splitToTwoCanvases(src, mask, w, h) {
+        const srcCv = doc.createElement("canvas")
+        srcCv.width = w
+        srcCv.height = h
+        const sg = srcCv.getContext("2d")
+        sg.drawImage(src, 0, 0, w, h)
+        const srcData = sg.getImageData(0, 0, w, h).data
+
+        const bgCv = doc.createElement("canvas")
+        bgCv.width = w
+        bgCv.height = h
+        const bgG = bgCv.getContext("2d")
+        const bgImg = bgG.createImageData(w, h)
+
+        const fgCv = doc.createElement("canvas")
+        fgCv.width = w
+        fgCv.height = h
+        const fgG = fgCv.getContext("2d")
+        const fgImg = fgG.createImageData(w, h)
+
+        // 【背景层就是【完整原图】，不做任何挖空】
+        //
+        // 之前这里把「人物位置」填成了白色，于是「建立体」建出来是
+        // 两次抠图叠在一起 —— 背景层中间一大块白，人物层只有人形。
+        //
+        // 正确的立体应该是：
+        //   背景层 = 整张原图（一个字都不改）
+        //   人物层 = 只有人物，其余透明
+        // 两层叠起来，从正面看是完整的画，但人物浮在前面有厚度。
+        for (let p = 0; p < w * h; p++) {
+          const i = p * 4
+          // 背景层：原样复制
+          bgImg.data[i] = srcData[i]
+          bgImg.data[i + 1] = srcData[i + 1]
+          bgImg.data[i + 2] = srcData[i + 2]
+          bgImg.data[i + 3] = 255
+
+          // 人物层：只有非背景的部分
+          if (!mask[p]) {
+            fgImg.data[i] = srcData[i]
+            fgImg.data[i + 1] = srcData[i + 1]
+            fgImg.data[i + 2] = srcData[i + 2]
+            fgImg.data[i + 3] = 255
+          }
+        }
+        bgG.putImageData(bgImg, 0, 0)
+        fgG.putImageData(fgImg, 0, 0)
+        return { bgCv, fgCv }
+      }
+
+      // 把 canvas 采样成网格（透明处返回 -1）
+      function canvasToGrid(canvas, cols, rows, useAlpha) {
+        const cv = doc.createElement("canvas")
+        cv.width = cols
+        cv.height = rows
+        const g = cv.getContext("2d")
+        g.drawImage(canvas, 0, 0, cols, rows)
+        const data = g.getImageData(0, 0, cols, rows).data
+        const grid = []
+        for (let y = 0; y < rows; y++) {
+          const row = []
+          for (let x = 0; x < cols; x++) {
+            const i = (y * cols + x) * 4
+            if (useAlpha && data[i + 3] < 128) { row.push(-1); continue }
+            row.push(imgNearest(data[i], data[i + 1], data[i + 2]))
+          }
+          grid.push(row)
+        }
+        return grid
+      }
+
+      // ---- 面板 ----
+      function buildImagePanel() {
+        const old = doc.getElementById(IDS.pane + "-img")
+        if (old) old.remove()
+
+        const box = doc.createElement("div")
+        box.id = IDS.pane + "-img"
+        box.style.cssText = [
+          "position:fixed", "left:50%", "top:50%", "transform:translate(-50%,-50%)",
+          "z-index:2147480101", "padding:16px", "border-radius:16px",
+          "background:rgba(18,22,30,.97)", "color:#fff", "width:min(1080px,96vw)",
+          "border:1px solid #ffffff33", "pointer-events:auto",
+          "font:12px/1.6 system-ui,-apple-system,sans-serif",
+          "backdrop-filter:blur(18px)", "-webkit-backdrop-filter:blur(18px)",
+          "box-shadow:0 16px 48px #00000099",
+        ].join(";")
+
+        const title = doc.createElement("div")
+        title.textContent = "图片 → 方块"
+        title.style.cssText = "font-weight:700;font-size:15px;margin-bottom:8px"
+
+        const guide = doc.createElement("div")
+        guide.style.cssText = [
+          "font-size:11.5px", "opacity:.72", "margin-bottom:12px",
+          "padding:10px 12px", "border-radius:10px",
+          "background:rgba(255,255,255,.05)", "border-left:2px solid #d9a93c88",
+          "line-height:1.85",
+        ].join(";")
+
+        const gline = (n, text, extra) => {
+          const row2 = doc.createElement("div")
+          row2.style.cssText = "display:flex;gap:8px;align-items:flex-start"
+          const num = doc.createElement("span")
+          num.textContent = n
+          num.style.cssText = "color:#d9a93c;font-weight:700;flex:none"
+          const body2 = doc.createElement("span")
+          body2.textContent = text
+          row2.append(num, body2)
+          if (extra) {
+            const sub = doc.createElement("span")
+            sub.textContent = extra
+            sub.style.cssText = "display:block;opacity:.6;margin-top:1px"
+            body2.appendChild(sub)
+          }
+          return row2
+        }
+
+        guide.append(
+          gline("1.", "把图片拖进最左边的框",
+            "或点它选文件。支持 PNG 和 JPEG。"),
+          gline("2.", "中间三个框会自动填好",
+            "原图 = 一整张；背景层 = 抠掉人物；抠图层 = 只有人物，棋盘格处是空的。"),
+          gline("3.", "拖「占地」定大小，「抠图容差」调抠得干不干净",
+            "世界 96×96 米。占地 20 米就是图占 20 米宽。"),
+          gline("4.", "点下面的按钮直接建，不经过 AI",
+            "「建平面」= 一整张原图一面墙；「建立体」= 背景墙 + 前面紧贴人物层。"),
+        )
+
+        // ---- 三框 ----
+        const row = doc.createElement("div")
+        row.style.cssText = "display:flex;gap:10px;align-items:stretch"
+
+        const mkPane = (label) => {
+          const wrap = doc.createElement("div")
+          wrap.style.cssText = "flex:1;display:flex;flex-direction:column;gap:4px"
+          const cap = doc.createElement("div")
+          cap.textContent = label
+          cap.style.cssText = "font-size:10.5px;opacity:.5;text-align:center"
+          const pane = doc.createElement("div")
+          pane.style.cssText = [
+            "height:220px", "border-radius:10px", "border:1px solid #ffffff22",
+            "background:rgba(255,255,255,.04)", "display:flex",
+            "align-items:center", "justify-content:center", "overflow:hidden",
+            "position:relative",
+          ].join(";")
+          wrap.append(cap, pane)
+          return { wrap, pane }
+        }
+
+        // 四个框：原图 → 平面预览 → 背景层 → 抠图层
+        //
+        // 「平面预览」是转换后的结果（24 色量化），和「原图」不同 ——
+        // 原图是照片色，预览是方块色。用户看到的就是建出来会是什么样。
+        const leftBox = mkPane("原图")
+        const flatBox = mkPane("平面预览")
+        const midBox = mkPane("背景层")
+        const rightBox = mkPane("抠图层")
+
+        leftBox.pane.style.border = "2px dashed #ffffff44"
+        leftBox.pane.style.cursor = "pointer"
+        const leftTip = doc.createElement("div")
+        leftTip.textContent = "拖图片进来 / 点击选择"
+        leftTip.style.cssText = "opacity:.45;font-size:11px;text-align:center;padding:16px"
+        leftBox.pane.appendChild(leftTip)
+
+        const flatTip = doc.createElement("div")
+        flatTip.textContent = "转换结果"
+        flatTip.style.cssText = "opacity:.3;font-size:11px"
+        flatBox.pane.appendChild(flatTip)
+
+        const midTip = doc.createElement("div")
+        midTip.textContent = "自动抠出"
+        midTip.style.cssText = "opacity:.3;font-size:11px"
+        midBox.pane.appendChild(midTip)
+
+        const rightTip = doc.createElement("div")
+        rightTip.textContent = "自动抠出"
+        rightTip.style.cssText = "opacity:.3;font-size:11px"
+        rightBox.pane.appendChild(rightTip)
+
+        // 抠图层用棋盘格背景表示透明
+        rightBox.pane.style.backgroundImage =
+          "linear-gradient(45deg,#ffffff11 25%,transparent 25%,transparent 75%,#ffffff11 75%)," +
+          "linear-gradient(45deg,#ffffff11 25%,transparent 25%,transparent 75%,#ffffff11 75%)"
+        rightBox.pane.style.backgroundSize = "12px 12px"
+        rightBox.pane.style.backgroundPosition = "0 0,6px 6px"
+
+        row.append(leftBox.wrap, flatBox.wrap, midBox.wrap, rightBox.wrap)
+        box.append(title, guide, row)
+
+        // ---- 参数 ----
+        const ctrl = doc.createElement("div")
+        ctrl.style.cssText = "display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap"
+
+        const densLabel = doc.createElement("span")
+        densLabel.textContent = "占地"
+        densLabel.style.cssText = "opacity:.6;flex:none"
+
+        const dens = doc.createElement("input")
+        dens.type = "range"
+        dens.min = "4"
+        dens.max = "64"
+        dens.value = "20"
+        dens.style.cssText = "flex:1;min-width:120px;max-width:240px"
+
+        const densVal = doc.createElement("span")
+        densVal.style.cssText = "opacity:.6;min-width:96px;text-align:right"
+
+        const tolLabel = doc.createElement("span")
+        tolLabel.textContent = "抠图容差"
+        tolLabel.style.cssText = "opacity:.6;flex:none;margin-left:8px"
+
+        const tol = doc.createElement("input")
+        tol.type = "range"
+        tol.min = "10"
+        tol.max = "120"
+        tol.value = "40"
+        tol.style.cssText = "width:100px"
+
+        const tolVal = doc.createElement("span")
+        tolVal.textContent = "40"
+        tolVal.style.cssText = "opacity:.5;min-width:28px"
+
+        ctrl.append(densLabel, dens, densVal, tolLabel, tol, tolVal)
+        box.appendChild(ctrl)
+
+        // ---- 出口 ----
+        const btns = doc.createElement("div")
+        btns.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:14px"
+
+        const mk2 = (label, primary) => {
+          const b = doc.createElement("button")
+          b.type = "button"
+          b.textContent = label
+          b.style.cssText = [
+            "height:32px", "padding:0 18px", "border-radius:999px", "cursor:pointer",
+            "font:inherit", "font-weight:700", "font-size:12px",
+            primary
+              ? "border:1px solid #d9a93c99;background:#d9a93c22;color:#fff"
+              : "border:1px solid #ffffff44;background:transparent;color:#fff",
+          ].join(";")
+          return b
+        }
+        const btnFlat = mk2("0 token 建平面", false)
+        const btnSolid = mk2("0 token 建立体", true)
+        const btnClose = mk2("关闭", false)
+        btns.append(btnClose, btnFlat, btnSolid)
+        box.appendChild(btns)
+
+        // ---- 行为 ----
+        const fileInput = doc.createElement("input")
+        fileInput.type = "file"
+        fileInput.accept = "image/png,image/jpeg,image/webp,image/*"
+        fileInput.style.display = "none"
+
+        const colsForMeters = (m) => Math.max(4, Math.min(128, Math.round((Number(m) || 20) / 0.5)))
+
+        const refresh = () => {
+          if (!imgSrc) return
+          const cols = colsForMeters(dens.value)
+          const rows = Math.max(1, Math.min(128, Math.round(cols * imgH / imgW)))
+          densVal.innerHTML = ""
+          const l1 = doc.createElement("div")
+          l1.textContent = (cols * 0.5).toFixed(0) + "×" + (rows * 0.5).toFixed(0) + "米"
+          l1.style.cssText = "font-weight:700;font-size:11.5px"
+          const l2 = doc.createElement("div")
+          l2.textContent = cols + "×" + rows + "格"
+          l2.style.cssText = "opacity:.5;font-size:10.5px"
+          densVal.append(l1, l2)
+
+          // 重建蒙版和两张图层（容差变了要重算）
+          const cv = doc.createElement("canvas")
+          cv.width = imgW
+          cv.height = imgH
+          const g = cv.getContext("2d")
+          g.drawImage(imgSrc, 0, 0, imgW, imgH)
+          const data = g.getImageData(0, 0, imgW, imgH).data
+          const bgColors = detectBgColors(data, imgW, imgH)
+          imgMask = buildMask(data, imgW, imgH, bgColors, Number(tol.value) || 40)
+          const { bgCv, fgCv } = splitToTwoCanvases(imgSrc, imgMask, imgW, imgH)
+          imgBgCanvas = bgCv
+          imgFgCanvas = fgCv
+
+          // 平面预览：原图量化成 24 色的小图
+          flatBox.pane.innerHTML = ""
+          const flatCv = doc.createElement("canvas")
+          const previewCols = Math.min(64, cols)
+          const previewRows = Math.max(1, Math.round(previewCols * imgH / imgW))
+          flatCv.width = previewCols
+          flatCv.height = previewRows
+          const fg2 = flatCv.getContext("2d")
+          fg2.imageSmoothingEnabled = false
+          fg2.drawImage(imgSrc, 0, 0, previewCols, previewRows)
+          const flatData = fg2.getImageData(0, 0, previewCols, previewRows)
+          for (let yy = 0; yy < previewRows; yy++) {
+            for (let xx = 0; xx < previewCols; xx++) {
+              const ii = (yy * previewCols + xx) * 4
+              const mi = imgNearest(flatData.data[ii], flatData.data[ii + 1], flatData.data[ii + 2])
+              const cc = IMG_PALETTE[mi]
+              flatData.data[ii] = cc[0]
+              flatData.data[ii + 1] = cc[1]
+              flatData.data[ii + 2] = cc[2]
+            }
+          }
+          fg2.putImageData(flatData, 0, 0)
+          const flatImg = doc.createElement("img")
+          flatImg.src = flatCv.toDataURL("image/png")
+          flatImg.style.cssText = "max-width:100%;max-height:220px;image-rendering:pixelated"
+          flatBox.pane.appendChild(flatImg)
+
+          // 显示到中框和右框
+          midBox.pane.innerHTML = ""
+          const m = doc.createElement("img")
+          m.src = bgCv.toDataURL("image/png")
+          m.style.cssText = "max-width:100%;max-height:220px;image-rendering:pixelated"
+          midBox.pane.appendChild(m)
+
+          rightBox.pane.innerHTML = ""
+          const r2 = doc.createElement("img")
+          r2.src = fgCv.toDataURL("image/png")
+          r2.style.cssText = "max-width:100%;max-height:220px;image-rendering:pixelated"
+          rightBox.pane.appendChild(r2)
+        }
+
+        const loadFile = (file) => {
+          if (!file || !/^image\//.test(file.type)) {
+            aiLog("图片通道：请拖图片文件进来")
+            return
+          }
+          const url = URL.createObjectURL(file)
+          const im = new Image()
+          im.onload = () => {
+            imgSrc = im
+            imgW = im.naturalWidth
+            imgH = im.naturalHeight
+            leftBox.pane.innerHTML = ""
+            const thumb = doc.createElement("img")
+            thumb.src = url
+            thumb.style.cssText = "max-width:100%;max-height:220px;display:block"
+            leftBox.pane.appendChild(thumb)
+            leftBox.pane.style.border = "1px solid #ffffff22"
+            refresh()
+          }
+          im.onerror = () => aiLog("图片通道：这张图读不了")
+          im.src = url
+        }
+
+        leftBox.pane.addEventListener("click", () => fileInput.click())
+        fileInput.addEventListener("change", () => {
+          if (fileInput.files && fileInput.files[0]) loadFile(fileInput.files[0])
+        })
+        leftBox.pane.addEventListener("dragover", (ev) => {
+          ev.preventDefault(); ev.stopPropagation()
+          leftBox.pane.style.borderColor = "#d9a93c"
+        })
+        leftBox.pane.addEventListener("dragleave", () => {
+          leftBox.pane.style.borderColor = "#ffffff44"
+        })
+        leftBox.pane.addEventListener("drop", (ev) => {
+          ev.preventDefault(); ev.stopPropagation()
+          leftBox.pane.style.borderColor = "#ffffff22"
+          const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0]
+          if (f) loadFile(f)
+        })
+        for (const evName of ["dragover", "drop", "dragenter"]) {
+          box.addEventListener(evName, (ev) => { ev.preventDefault(); ev.stopPropagation() })
+        }
+
+        dens.addEventListener("input", refresh)
+        tol.addEventListener("input", () => { tolVal.textContent = tol.value; refresh() })
+
+        const gridToLines = (grid, cols, rows, baseX, baseZ) => {
+          const out = []
+          for (let ry = 0; ry < rows; ry++) {
+            const wy = rows - 1 - ry
+            let runStart = -1
+            let runMat = -2
+            for (let rx = 0; rx <= cols; rx++) {
+              const m = rx < cols ? grid[ry][rx] : -2
+              if (m !== runMat) {
+                if (runMat >= 0 && runStart >= 0 && rx > runStart) {
+                  out.push("box " + (baseX + runStart) + " " + wy + " " + baseZ + " " + (rx - runStart) + " 1 1 " + runMat)
+                }
+                runStart = m >= 0 ? rx : -1
+                runMat = m
+              }
+            }
+          }
+          return out
+        }
+
+        const doBuild = (layered) => {
+          if (!imgSrc || !imgBgCanvas) { aiLog("图片通道：先放一张图进来"); return }
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.submitAI !== "function") { aiLog("图片通道：引擎没起来"); return }
+          const cols = colsForMeters(dens.value)
+          const rows = Math.max(1, Math.min(128, Math.round(cols * imgH / imgW)))
+          const baseX = Math.max(0, Math.floor((192 - cols) / 2))
+          const baseZ = 100
+
+          let lines
+
+          if (layered) {
+            // 立体：背景层（完整矩形）+ 人物层（镂空，紧贴前面）
+            const bgGrid = canvasToGrid(imgBgCanvas, cols, rows, false)
+            const fgGrid = canvasToGrid(imgFgCanvas, cols, rows, true)
+            lines = gridToLines(bgGrid, cols, rows, baseX, baseZ)
+              .concat(gridToLines(fgGrid, cols, rows, baseX, baseZ + 1))
+          } else {
+            // 平面：一整张【原图】，不是抠出来的背景层。
+            // 之前这里误用了 imgBgCanvas，于是「建平面」建出来的人物是空的。
+            const fullGrid = canvasToGrid(imgSrc, cols, rows, false)
+            lines = gridToLines(fullGrid, cols, rows, baseX, baseZ)
+          }
+
+          const r = vp.submitAI(lines.join("\n"), "image:" + Date.now())
+          if (r && r.ok) {
+            aiLog("图片通道：" + (layered ? "立体" : "平面") + "已建，" + r.total + " 块（" + cols + "×" + rows + "）")
+          } else {
+            aiLog("图片通道：建造失败 " + JSON.stringify(r && r.errors))
+          }
+        }
+
+        btnFlat.addEventListener("click", () => doBuild(false))
+        btnSolid.addEventListener("click", () => doBuild(true))
+        btnClose.addEventListener("click", () => { try { box.remove() } catch (err) { /* 已移除 */ } })
+
+        doc.body.appendChild(box)
+        doc.body.appendChild(fileInput)
+      }
+
+      // ============================================================
+      //  攻略本
+      // ============================================================
+      //
+      // 建造方法、踩过的坑、好用的参数组合 —— 都往这里记。
+      //
+      // 【必须持久化】
+      // 图纸丢了是白干，攻略丢了是白想。两者都存 localStorage。
+      // 这也是原则零的一部分：这些内容不该靠 AI 记住，该靠磁盘。
+
+      const GUIDE_KEY = "dsh-weather-sandbox/build-guide-v1"
+
+      function loadGuideEntries() {
+        try {
+          const raw = win.localStorage.getItem(GUIDE_KEY)
+          if (!raw) return []
+          const arr = JSON.parse(raw)
+          return Array.isArray(arr) ? arr.filter((e) => e && typeof e.title === "string") : []
+        } catch (error) {
+          return []
+        }
+      }
+
+      function saveGuideEntries(list) {
+        try {
+          win.localStorage.setItem(GUIDE_KEY, JSON.stringify(list.slice(0, 200)))
+          return true
+        } catch (error) {
+          return false
+        }
+      }
+
+      function showGuideBook() {
+        const old = doc.getElementById(IDS.pane + "-guide")
+        if (old) { old.remove(); return }
+
+        const box = doc.createElement("div")
+        box.id = IDS.pane + "-guide"
+        box.style.cssText = [
+          "position:fixed", "left:14px", "bottom:64px", "z-index:2147480100",
+          "width:min(460px,92vw)", "max-height:min(560px,72vh)", "overflow-y:auto",
+          "padding:14px", "border-radius:14px", "pointer-events:auto",
+          "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 96%, transparent)",
+          "border:1px solid #ffffff55",
+          "backdrop-filter:blur(16px)", "-webkit-backdrop-filter:blur(16px)",
+          "box-shadow:0 10px 32px #00000055",
+          "font:inherit", "font-size:12px",
+        ].join(";")
+
+        const head = doc.createElement("div")
+        head.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-bottom:4px"
+        const title = doc.createElement("div")
+        title.textContent = "攻略本"
+        title.style.cssText = "font-weight:700;font-size:13.5px"
+        const closeBtn = doc.createElement("button")
+        closeBtn.type = "button"
+        closeBtn.textContent = "×"
+        closeBtn.title = "收起"
+        closeBtn.style.cssText = [
+          "width:22px", "height:22px", "padding:0", "border-radius:6px",
+          "cursor:pointer", "border:none", "background:transparent",
+          "color:inherit", "opacity:.45", "font-size:16px", "line-height:1",
+        ].join(";")
+        closeBtn.addEventListener("click", () => { try { box.remove() } catch (e) { /* 已移除 */ } })
+        head.append(title, closeBtn)
+
+        const hint = doc.createElement("div")
+        hint.textContent = "记下来会一直留着（存在本地，程序退出也不丢）"
+        hint.style.cssText = "opacity:.45;font-size:10.5px;margin-bottom:10px"
+
+        // ---- 新增区 ----
+        const inputTitle = doc.createElement("input")
+        inputTitle.type = "text"
+        inputTitle.placeholder = "标题，比如：塔楼怎么收腰"
+        inputTitle.style.cssText = [
+          "width:100%", "box-sizing:border-box", "height:28px", "padding:0 8px",
+          "margin-bottom:6px", "border-radius:7px",
+          "border:1px solid #ffffff33", "background:#00000012", "color:inherit",
+          "font:inherit", "font-size:11.5px", "outline:none",
+        ].join(";")
+
+        const inputBody = doc.createElement("textarea")
+        inputBody.placeholder = "内容。可以写做法、参数、踩过的坑。"
+        inputBody.rows = 3
+        inputBody.style.cssText = [
+          "width:100%", "box-sizing:border-box", "padding:6px 8px",
+          "margin-bottom:6px", "border-radius:7px", "resize:vertical",
+          "border:1px solid #ffffff33", "background:#00000012", "color:inherit",
+          "font:inherit", "font-size:11.5px", "outline:none",
+        ].join(";")
+
+        const addBtn = doc.createElement("button")
+        addBtn.type = "button"
+        addBtn.textContent = "记下来"
+        addBtn.style.cssText = [
+          "width:100%", "padding:6px", "border-radius:7px", "cursor:pointer",
+          "border:1px solid #d9a93c88", "background:#d9a93c1a", "color:inherit",
+          "font:inherit", "font-size:11.5px", "font-weight:700",
+        ].join(";")
+
+        const listBox = doc.createElement("div")
+        listBox.style.cssText = "margin-top:12px;display:flex;flex-direction:column;gap:6px"
+
+        const renderList = () => {
+          const list = loadGuideEntries()
+          listBox.textContent = ""
+          if (!list.length) {
+            const empty = doc.createElement("div")
+            empty.textContent = "还没有记录。"
+            empty.style.cssText = "opacity:.35;font-size:11px;padding:8px 0"
+            listBox.appendChild(empty)
+            return
+          }
+          list.forEach((e, idx) => {
+            const card = doc.createElement("div")
+            card.style.cssText = [
+              "padding:8px 10px", "border-radius:8px",
+              "border:1px solid #ffffff22", "background:#00000010",
+            ].join(";")
+            const ct = doc.createElement("div")
+            ct.style.cssText = "display:flex;justify-content:space-between;gap:8px;align-items:flex-start"
+            const cname = doc.createElement("div")
+            cname.textContent = e.title
+            cname.style.cssText = "font-weight:700;font-size:11.5px;flex:1"
+            const del = doc.createElement("button")
+            del.type = "button"
+            del.textContent = "×"
+            del.title = "删掉这条"
+            del.style.cssText = [
+              "width:18px", "height:18px", "padding:0", "border-radius:5px",
+              "cursor:pointer", "border:none", "background:transparent",
+              "color:inherit", "opacity:.35", "font-size:14px", "line-height:1", "flex:none",
+            ].join(";")
+            del.addEventListener("click", () => {
+              const cur = loadGuideEntries()
+              cur.splice(idx, 1)
+              saveGuideEntries(cur)
+              renderList()
+            })
+            ct.append(cname, del)
+            const cb = doc.createElement("div")
+            cb.textContent = e.body || ""
+            cb.style.cssText = "opacity:.65;font-size:11px;margin-top:3px;white-space:pre-wrap;line-height:1.6"
+            card.append(ct, cb)
+            listBox.appendChild(card)
+          })
+        }
+
+        addBtn.addEventListener("click", () => {
+          const titleText = String(inputTitle.value || "").trim()
+          if (!titleText) { inputTitle.focus(); return }
+          const list = loadGuideEntries()
+          list.unshift({
+            title: titleText,
+            body: String(inputBody.value || "").trim(),
+            at: Date.now(),
+          })
+          if (saveGuideEntries(list)) {
+            inputTitle.value = ""
+            inputBody.value = ""
+            renderList()
+          } else {
+            aiLog("攻略本：存不下（本地存储满了）")
+          }
+        })
+
+        box.append(head, hint, inputTitle, inputBody, addBtn, listBox)
+        doc.body.appendChild(box)
+        renderList()
+        try { inputTitle.focus() } catch (error) { /* 忽略 */ }
+      }
+
+      // ---- 操作说明（把快捷键写出来，用户不用猜）----
+      function showHelp() {
+        if (doc.getElementById(IDS.pane + "-help")) {
+          doc.getElementById(IDS.pane + "-help").remove()
+          return
+        }
+        const box = doc.createElement("div")
+        box.id = IDS.pane + "-help"
+        box.style.cssText = [
+          "position:fixed", "left:14px", "bottom:88px", "z-index:2147480099",
+          "width:280px", "padding:14px", "border-radius:14px",
+          "background:rgba(20,24,32,.92)", "color:#fff",
+          "border:1px solid #ffffff44", "pointer-events:auto",
+          "backdrop-filter:blur(14px)", "-webkit-backdrop-filter:blur(14px)",
+          "box-shadow:0 8px 28px #00000066",
+          "font:inherit", "font-size:12px", "line-height:1.8",
+        ].join(";")
+
+        const rows = [
+          ["左键点 / 拖空地", "放置方块"],
+          ["右键 / Ctrl+Z", "撤销上一步"],
+          ["Shift + 拖", "框选铺一层"],
+          ["Alt + 拖", "框选起立体"],
+          ["PageUp / PageDown", "抬高 / 降低建造层"],
+          ["滚轮", "推近推远"],
+          ["<b>R + 拖建筑</b>", "<b>旋转这栋楼</b>"],
+          ["<b>M + 拖建筑</b>", "<b>移动这栋楼</b>"],
+          ["点 ? 后再拖", "临时进入旋转/移动"],
+        ]
+        const html = rows.map(([k, v]) =>
+          '<div style="display:flex;justify-content:space-between;gap:10px">' +
+          '<span style="opacity:.75">' + k + '</span>' +
+          '<span style="text-align:right">' + v + '</span></div>'
+        ).join("")
+
+        box.innerHTML =
+          '<div style="font-weight:700;margin-bottom:8px;font-size:12.5px">世界操作</div>' +
+          html +
+          '<div style="margin-top:10px;opacity:.6;font-size:11px">' +
+          '旋转和移动都要按住字母键再拖，平时左键就是点方块。</div>'
+
+        doc.body.appendChild(box)
+      }
+
+
+
+      // 进入/退出沉浸的双向开关。
+      // 【原来只能单向】goTalk 只做「退出沉浸」，再点一次没反应 ——
+      // 用户点了「对话」退出之后，想回去看世界就没有按钮了。
+      // 现在按当前状态决定方向：在里面就出去，在外面就进来。
+      // 按钮文字也跟着变，让人一眼知道点下去会发生什么。
+      function goTalk() {
+        if (immersive) {
+          // 在沉浸态 → 退出，去和 AI 说话
+          setImmersive(false)
+          // 焦点给输入框。DSH 的输入框不是我们建的，只能按特征找。
+          win.setTimeout(() => {
+            try {
+              const cands = doc.querySelectorAll(
+                '[data-slot="main"] textarea, [data-slot="main"] [contenteditable="true"], ' +
+                'textarea[placeholder], [contenteditable="true"]'
+              )
+              for (const el of cands) {
+                if (el.offsetParent === null) continue   // 不可见的跳过
+                el.focus()
+                break
+              }
+            } catch (error) { /* 找不到就算了 */ }
+          }, 120)
+        } else {
+          // 在界面里 → 回到沉浸看世界
+          setImmersive(true)
+        }
+        syncTalkButton()
+      }
+
+      // 按钮文字随状态变：「对话」/「看世界」
+      function syncTalkButton() {
+        const btn = doc.querySelector("." + "oss-ai-talk")
+        if (!btn) return
+        btn.textContent = immersive ? "对话" : "看世界"
+        btn.title = immersive ? "回到界面和 AI 说话" : "回到方块世界"
+      }
+
+      function aiLog(line) {        if (!aiLogEl) return
+        const t = new Date()
+        const stamp = String(t.getHours()).padStart(2, "0") + ":" +
+          String(t.getMinutes()).padStart(2, "0") + ":" +
+          String(t.getSeconds()).padStart(2, "0")
+        aiLogEl.textContent = ("[" + stamp + "] " + line + "\n" + aiLogEl.textContent).slice(0, 2000)
+      }
+
+      // ============================================================
+      //  肥鱼创世
+      // ============================================================
+      // 用户点它之后要做三件事：
+      //   1. 大肥鱼进入做梦状态（动画层，后面接）
+      //   2. 弹窗问：用当前对话的 AI，还是新开一个对话
+      //   3. 往那个会话发一条「你已进入创世大陆」的消息
+      //
+      // 【第 3 步为什么是整个功能的核心】
+      //   AI 平时坐在聊天框里，就算工具列表里有 voxel_build，它也不会
+      //   主动想到「我可以去操作一个 3D 世界」。必须有人告诉它：
+      //   「你现在在一个可造物的世界里，这是工作区，这些是你的工具。」
+      //   这条消息就是那个「通知」。没有它，AI 永远在山脚下站着。
+      // 【这条消息是跟真实 AI 试过之后精简的】
+      // 第一版写了世界尺寸、7 个工具摘要、"详见 SKILL 文件"。
+      // 实测反馈：工具描述里已经有完整语法规格，那段摘要是冗余的，
+      // 而且"详见 SKILL"当时文件根本不在它能读的地方 —— 纯噪音。
+      //
+      // 真正起作用的只有两条行为约束 + 一条工具里没有的信息：
+      //   1. 先 query（不放这条，AI 会直接开始堆方块）
+      //   2. 先问用户（不放这条，AI 会自作主张选位置）
+      //   3. 分区（这条工具描述里没有，是唯一需要人亲口说的「位置意图」）
+      //
+      // 其余交给 skill：genesis-voxel 已经装在工作区的 skills 目录里，
+      // AI 会自己看到并读取。
+      // 【手册用文件给出，不假定会话里有 skill 工具】
+      //
+      // 走过两次弯路：
+      //   1. 写「两份手册，开工前都读一下」→ 新 AI 去文件系统翻 .md，找不到
+      //   2. 写「用 skill 工具」→ 那个会话的工具清单里根本没有 skill，
+      //      新 AI 老老实实说「我没法加载技能」，没有假装读过
+      //
+      // 现在两份手册固定放在工作区根目录，只要 read 工具就能读到。
+      // 消息里给完整文件名，不让它猜、也不用它列目录。
+      // 【手册用文件给出，不假定会话里有 skill 工具】
+      //
+      // 走过三次弯路：
+      //   1. 「两份手册，开工前都读一下」→ 新 AI 去文件系统翻 .md，找不到
+      //   2. 「用 skill 工具加载」→ 那个会话的工具清单里根本没有 skill
+      //   3. 写死 E:\DeepSeek 工作区\... → 对别人的工作区就是错的
+      //
+      // 现在：插件启动时把两份手册写进当前工作区（用 workingDirectory 服务拿路径），
+      // 消息里只给【文件名】—— AI 的当前目录就是工作区根，相对路径永远对。
+      const CREATE_MSG =
+        "【你已进入创世大陆工作区】\n\n"
+        + "这个工作区有一个可以直接用工具操作的三维方块世界。\n\n"
+        + "开工前先读这两份手册（就在当前工作目录下，用 read 工具）：\n"
+        + "  创世大陆-操作手册.md   —— 怎么动手：frame 语法、仓库、固化\n"
+        + "  建筑公理.md            —— 怎么想：七条公理，把需求拆成可施工步骤\n"
+        + "第二份尤其重要。不知道公理，你只能照着字面摆方块；\n"
+        + "知道了，给你「一座哥特教堂」你也能自己拆出来。\n\n"
+        + "三条规矩：\n"
+        + "1. 动手前先 voxel_query，看世界里已经有什么、宏仓库里有什么可复用\n"
+        + "2. 先问用户要建什么、建在哪里，别自作主张\n"
+        + "3. 分区：X 0~63 左 / 64~127 中 / 128~191 右，别把建筑都堆在中心\n\n"
+        + "读完这两份文件，再问用户想要什么。"
+
+      let createMenu = null
+
+      function onCreate() {
+        try {
+          // 大肥鱼先睡下（动画是下一个迭代的事，这里只发一个事件给引擎层，
+          // 没有接的地方也不会报错）
+          try {
+            if (win.__ossPetDream && typeof win.__ossPetDream === "function") {
+              win.__ossPetDream(true)
+            }
+          } catch (error) { /* 动画未接 */ }
+          showCreateMenu()
+        } catch (error) {
+          aiLog("创世失败: " + (error && error.message ? error.message : error))
+        }
+      }
+
+      function showCreateMenu() {
+        // 点一下开，再点一下关 —— 不要 × 按钮，少一个元素
+        if (createMenu) { closeCreateMenu(); return }
+
+        const box = doc.createElement("div")
+        // 窄而紧凑：三行都从同一个左边界起，行距收紧
+        box.style.cssText = [
+          "position:fixed", "left:14px", "bottom:64px", "z-index:2147480100",
+          "width:206px", "padding:9px 10px 10px", "border-radius:11px", "pointer-events:auto",
+          "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 95%, transparent)",
+          "border:1px solid #ffffff55",
+          "backdrop-filter:blur(14px)", "-webkit-backdrop-filter:blur(14px)",
+          "box-shadow:0 8px 28px #00000055",
+          "font:inherit", "font-size:11.5px",
+        ].join(";")
+
+        const h = doc.createElement("div")
+        h.textContent = "谁来建造"
+        h.style.cssText = "font-weight:700;font-size:12px;line-height:1.3;opacity:.88"
+
+        const sub = doc.createElement("div")
+        sub.textContent = "极简预设的 AI 会自动接到手册"
+        sub.style.cssText = "font-size:9.5px;line-height:1.4;margin-top:1px;opacity:.48"
+
+        const neu = doc.createElement("button")
+        neu.type = "button"
+        neu.textContent = "新建对话 · 接引 AI 降临"
+        neu.title = "开一个新会话，操作手册和建筑公理会自动交到里面的 AI 手上"
+        neu.style.cssText = [
+          "display:block", "width:100%", "margin-top:7px", "padding:6px 8px",
+          "border-radius:7px", "cursor:pointer", "text-align:left",
+          "font:inherit", "font-size:10.5px", "font-weight:700",
+          "border:1px solid #d9a93c88", "background:#d9a93c1a", "color:inherit",
+        ].join(";")
+        neu.addEventListener("click", () => {
+          closeCreateMenu()
+          try {
+            if (win.__ossPetDream && typeof win.__ossPetDream === "function") win.__ossPetDream(false)
+          } catch (error) { /* 忽略 */ }
+          enableNewAI()
+        })
+
+        box.append(h, sub, neu)
+        doc.body.appendChild(box)
+        createMenu = box
+      }
+
+      function closeCreateMenu() {
+        if (createMenu) { createMenu.remove(); createMenu = null }
+      }
+
+      // ============================================================
+      //  为什么不再支持「发给当前对话的 AI」
+      // ============================================================
+      // 原来那条路是：
+      //   sessions.scopeOf(ctx) → retain(sid) → binding.session.prompt(...)
+      // 三步，任何一步失败消息就发不出去。
+      //
+      // 实测：点了没反应，日志里也没有「已通知」——
+      // 说明 scopeOf(ctx) 拿不到当前会话（插件 ctx 不是会话作用域的 ctx）。
+      // 这条路要么换别的 API，要么就得遍历全部会话去猜哪个是当前的，
+      // 又绕又不可靠。
+      //
+      // 而「新开对话」这条路是 DSH 原生支持的：
+      //   startSession(undefined, { prompt: "..." })
+      // 开会话和塞初始消息是一步完成的，不需要 retain / prompt 那一套。
+      //
+      // 所以按用户的要求：搞不定就不搞了，只留能用的那条。
+      // 想建东西的用户点一次就进新对话，反而更清楚。
+
+      // 开一个新会话，并把初始消息塞进去。
+      // startSession 支持 options.prompt，不用先开再发。
+      function enableNewAI() {
+        // 【诊断先行】
+        // 上一版点了没反应，日志里也没有任何提示 —— 说明失败发生在
+        // 我看不到的地方（async 拒掉了、或者服务根本不存在）。
+        // 现在每一步都写日志，用户能直接看到卡在哪。
+        try {
+          aiLog("创世：开始新开会话…")
+
+          const hasCtx = !!ctx
+          const ui = ctx && ctx.uiWorkspace
+          const hasMethod = ui && typeof ui.startSession === "function"
+          aiLog("  诊断 ctx=" + hasCtx + " uiWorkspace=" + !!ui + " startSession=" + !!hasMethod)
+
+          if (!ui || !hasMethod) {
+            // 服务没注入进来。把 ctx 上现有的服务名列一下，方便定位。
+            let keys = []
+            try {
+              for (const k in ctx) {
+                if (typeof ctx[k] === "object" && ctx[k] !== null) keys.push(k)
+              }
+            } catch (error) { keys = ["<枚举失败>"] }
+            aiLog("  ctx 上的服务: " + keys.slice(0, 20).join(", "))
+            aiLog("无法新开会话：uiWorkspace 未注入")
+            return
+          }
+
+          // 沉浸态下界面是隐藏的，新会话可能开在看不见的地方。
+          // 先退出沉浸，保证用户能看到结果。
+          if (immersive) {
+            aiLog("  先退出沉浸模式，让新会话可见")
+            setImmersive(false)
+          }
+
+          ui.startSession(undefined, { prompt: CREATE_MSG })
+          aiLog("已请求新开会话（消息已带上）")
+        } catch (error) {
+          aiLog("新开会话抛错: " + (error && error.message ? error.message : error))
+          if (error && error.stack) {
+            aiLog("  " + String(error.stack).split("\n").slice(0, 3).join(" | "))
+          }
+        }
+      }
+
+      // 轮询进度：AI 队列是引擎里一帧帧推进的，界面只需要读状态。
+      // 用 200ms 的轮询而不是每帧 —— 进度文字不需要 60fps 刷新。
+      function startAiProgress() {
+        if (aiProgTimer) return
+        const tick = () => {
+          let st = null
+          try {
+            const vp = win.__voxelPass
+            if (vp && typeof vp.aiStatus === "function") st = vp.aiStatus()
+          } catch (error) { /* 忽略 */ }
+          if (aiProgEl && st) {
+            if (st.total > 0) {
+              const pct = Math.round((st.done / st.total) * 100)
+              aiProgEl.textContent = st.active
+                ? st.done + "/" + st.total + " (" + pct + "%)"
+                : "完成 " + st.done + "/" + st.total
+            } else {
+              aiProgEl.textContent = ""
+            }
+          }
+          if (st && st.active) {
+            aiProgTimer = win.setTimeout(tick, 200)
+          } else {
+            aiProgTimer = 0
+            if (aiProgEl && st && st.total > 0) aiLog("生成完成，共 " + st.done + " 块")
+            refreshVoxelHud()
+          }
+        }
+        aiProgTimer = win.setTimeout(tick, 200)
+      }
+
+      function updateAiPanel() {
+        // 【只要方块大陆开着就显示，不再要求沉浸态】
+        // 原来是 immersive && voxelVisible。但退出沉浸（去和 AI 说话）时
+        // 建造台跟着消失，AI 执行进度就看不见了 —— 那正是最需要看的时候。
+        // 现在只要方块大陆开着就留着它。界面回来时它浮在左下角，
+        // 不和面板重叠，也不挡对话。
+        let want = false
+        try {
+          want = readSettings().voxelVisible === true
+        } catch (error) { want = false }
+        if (want && !aiPanel) buildAiPanel()
+        if (!aiPanel) return
+        aiPanel.style.display = want ? "flex" : "none"
+      }
+
+      // ============================================================
+      //  三仓库面板（砖头 / 图纸 / 宏）
+      // ============================================================
+      // 右上角 HUD 的重置按钮旁加一个「仓库」，点开是三栏列表。
+      //
+      // 三类东西的区别（界面上要说清，不然用户分不清）：
+      //   砖头 = 拆下来的散料，按材质计数
+      //   图纸 = 拆下来的整栋建筑，能原样摆回去
+      //   宏   = AI 写的指令文本，能重新执行（省地方，还能改参数）
+      let whPanel = null
+
+      function buildWarehousePanel() {
+        const wrap = doc.createElement("div")
+        wrap.id = IDS.pane + "-warehouse"
+        wrap.style.cssText = [
+          "position:fixed", "right:14px", "top:96px", "z-index:2147480099",
+          "width:300px", "max-height:60vh", "overflow-y:auto",
+          "display:none", "flex-direction:column", "gap:10px",
+          "padding:12px", "border-radius:14px", "pointer-events:auto",
+          "background:color-mix(in srgb, var(--dsw-alias-bg-layer-3, #fff) 90%, transparent)",
+          "border:1px solid #ffffff55",
+          "backdrop-filter:blur(14px)", "-webkit-backdrop-filter:blur(14px)",
+          "box-shadow:0 6px 28px #00000055",
+          "font:inherit", "font-size:11.5px",
+        ].join(";")
+        doc.body.appendChild(wrap)
+        whPanel = wrap
+      }
+
+      function renderWarehouses() {
+        if (!whPanel) return
+        try {
+          const vp = win.__voxelPass
+          if (!vp || typeof vp.allWarehouses !== "function") {
+            whPanel.textContent = "引擎未就绪"
+            return
+          }
+          const w = vp.allWarehouses()
+          const sec = (title, body) => {
+            const d = doc.createElement("div")
+            const h = doc.createElement("div")
+            h.textContent = title
+            h.style.cssText = "font-weight:700;font-size:11px;letter-spacing:.4px;opacity:.7;margin-bottom:4px"
+            const b = doc.createElement("div")
+            b.innerHTML = body
+            b.style.cssText = "line-height:1.7;font-size:11px"
+            d.append(h, b)
+            return d
+          }
+
+          whPanel.textContent = ""
+
+          // 砖头不显示：
+          // 放置方块不消耗砖，拆下来的砖也没有任何用途 —— 无限资源，
+          // 那这个「仓库」就只是一串没有意义的数字。删掉，把位置让给图纸和宏。
+
+          // 2. 图纸
+          const bps = w.blueprints
+          const bpRows = bps.length
+            ? bps.map((b) => {
+              const safe = b.name.replace(/'/g, "&#39;")
+              return b.name + " · " + b.count + " 块" +
+                " <button type='button' data-bp='" + safe +
+                "' style='cursor:pointer;border:1px solid #8886;background:transparent;color:inherit;border-radius:6px;padding:0 6px;font-size:10px'>放回</button>" +
+                " <button type='button' data-bpdel='" + safe +
+                "' title='删除这张图纸' style='cursor:pointer;border:1px solid #e55a5a88;background:transparent;color:#e88;border-radius:6px;padding:0 6px;font-size:10px'>删</button>"
+            }).join("<br>")
+            : "<span style='opacity:.5'>空</span>"
+          whPanel.appendChild(sec("图纸仓库", bpRows))
+
+          // 3. 宏 —— 显示中文名 + 说明 + 参数名，不显示坐标
+          // 用户明确要求：这个区域看到的是「人能看懂的东西」，
+          // 不要出现 box 40 0 40 这种坐标。
+          const ms = w.macros
+          const mRows = ms.length
+            ? ms.map((m) => {
+              const params = m.params && Object.keys(m.params).length
+                ? " · 参数 " + Object.keys(m.params).join(",")
+                : ""
+              const desc = m.desc ? " · " + m.desc : ""
+              const safeM = m.name.replace(/'/g, "&#39;")
+              return m.name + desc + params +
+                " <button type='button' data-macro='" + safeM +
+                "' style='cursor:pointer;border:1px solid #8886;background:transparent;color:inherit;border-radius:6px;padding:0 6px;font-size:10px'>执行</button>" +
+                " <button type='button' data-macrodel='" + safeM +
+                "' title='删除这个宏' style='cursor:pointer;border:1px solid #e55a5a88;background:transparent;color:#e88;border-radius:6px;padding:0 6px;font-size:10px'>删</button>"
+            }).join("<br>")
+            : "<span style='opacity:.5'>空（AI 可以用 voxel_build 的 macroSave 存一个）</span>"
+          whPanel.appendChild(sec("宏仓库", mRows))
+
+          // 按钮代理
+          whPanel.querySelectorAll("button[data-bp]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              try {
+                const r = vp.placeBlueprint(btn.dataset.bp)
+                if (typeof toast === "function") toast(r ? "放回 " + r.count + " 块" : "放不回去（位置被占或越界）")
+                renderWarehouses()
+                refreshVoxelHud()
+              } catch (error) { /* 忽略 */ }
+            })
+          })
+          whPanel.querySelectorAll("button[data-bpdel]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              try {
+                const name = btn.dataset.bpdel
+                if (vp.removeBlueprint && vp.removeBlueprint(name)) {
+                  if (typeof toast === "function") toast("已删除图纸 " + name)
+                } else {
+                  if (typeof toast === "function") toast("删不掉：" + name)
+                }
+                renderWarehouses()
+              } catch (error) { /* 忽略 */ }
+            })
+          })
+          whPanel.querySelectorAll("button[data-macrodel]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              try {
+                const name = btn.dataset.macrodel
+                const ok = vp.macros && vp.macros.remove ? vp.macros.remove(name) : false
+                if (typeof toast === "function") toast(ok ? "已删除宏 " + name : "删不掉：" + name)
+                renderWarehouses()
+              } catch (error) { /* 忽略 */ }
+            })
+          })
+          whPanel.querySelectorAll("button[data-macro]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              try {
+                vp.macros.run(btn.dataset.macro)
+                if (typeof toast === "function") toast("执行宏 " + btn.dataset.macro)
+                if (typeof startAiProgress === "function") startAiProgress()
+                renderWarehouses()
+              } catch (error) { /* 忽略 */ }
+            })
+          })
+        } catch (error) {
+          whPanel.textContent = "读取仓库失败"
+        }
+      }
+
+      function toggleWarehouses() {
+        if (!whPanel) buildWarehousePanel()
+        const showing = whPanel.style.display === "flex"
+        whPanel.style.display = showing ? "none" : "flex"
+        if (!showing) renderWarehouses()
+      }
+
+      // ============================================================
+      //  AI 指令通道（客户端这一半）
+      // ============================================================
+      // 每 400ms 问一次 Host 有没有 AI 发来的命令，有就执行，执行完回执。
+      //
+      // 为什么是轮询而不是长连接：
+      //   Host 那边用的是现成的精确 HTTP 路由，零新增基建。
+      //   400ms 对「AI 说一句话 → 方块开始长」完全够用，而且断线自愈
+      //   （下一拍继续拉），不需要重连逻辑。
+      //
+      // 支持的 op：
+      //   build     { commands: "box ...; hollow ..." }   → 走 submitAI，方块一帧帧长
+      //   demolish  { which: "all" } 或 { which: "building", id } → 拆
+      //   query     {}                                     → 返回世界/仓库状态
+      //   place     { name }                               → 图纸放回
+      //   macroRun  { name }                               → 执行宏仓库里的宏
+      //   reset     {}                                     → 重置世界
+      // 【轮询必须能失败退让】
+      // 第一版是死循环式 setInterval(400)，通道 404 的时候每 400ms 报一次错，
+      // 浏览器控制台被刷满，页面明显变卡 —— 用户看到的就是「界面全不显示」。
+      // 现在改成：
+      //   · 成功一次就恢复 400ms 的快节奏
+      //   · 连续失败就指数退让，最长退到 15 秒
+      //   · 连续失败 5 次就完全停下，直到用户重新进入方块大陆才重启
+      // 404 本身说明 Host 路由没注册（插件重启前的热更新状态），退让之后不再刷屏。
+      const AI_POLL_FAST = 400
+      const AI_POLL_MAX = 15000
+      const AI_FAIL_LIMIT = 5
+      let aiPollTimer = 0
+      let aiPollDelay = AI_POLL_FAST
+      let aiFailCount = 0
+      let aiPolling = false
+      let aiChannelStopped = false
+
+      function aiChannelUrl(suffix) {
+        // 【路径必须跟协议一致】
+        // ASSET_BASE 是 "/dsh-weather-sandbox/"，在 DSH 的 dsh-app:// 页面里
+        // 它会被解析成根路径，变成 404。用 new URL(相对, location.href) 拿到的
+        // 才是当前 origin 下的真实地址。
+        try {
+          return new URL((ASSET_BASE || "/dsh-weather-sandbox/") + suffix, win.location.href).toString()
+        } catch (error) {
+          return (ASSET_BASE || "/dsh-weather-sandbox/") + suffix
+        }
+      }
+
+      function scheduleAiPoll(delay) {
+        if (aiChannelStopped) return
+        if (aiPollTimer) { try { win.clearTimeout(aiPollTimer) } catch (e) { /* 忽略 */ } }
+        aiPollTimer = win.setTimeout(aiChannelTick, delay)
+      }
+
+      function aiChannelTick() {
+        aiPollTimer = 0
+        if (aiChannelStopped) return
+        if (aiPolling) { scheduleAiPoll(aiPollDelay); return }
+        aiPolling = true
+
+        const finish = (ok) => {
+          aiPolling = false
+          if (ok) {
+            aiFailCount = 0
+            aiPollDelay = AI_POLL_FAST
+          } else {
+            aiFailCount += 1
+            // 指数退让：400 → 800 → 1600 → 3200 → 6400
+            aiPollDelay = Math.min(AI_POLL_MAX, aiPollDelay * 2)
+            if (aiFailCount >= AI_FAIL_LIMIT) {
+              aiChannelStopped = true
+              return   // 不再排下一轮
+            }
+          }
+          scheduleAiPoll(aiPollDelay)
+        }
+
+        fetch(aiChannelUrl("-voxel-cmd"), { method: "GET", cache: "no-store" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            if (!data || !data.ok || !Array.isArray(data.commands)) { finish(false); return }
+            finish(true)
+            if (!data.commands.length) return
+            for (const cmd of data.commands) {
+              const ack = { id: cmd.id, ok: true, result: null }
+              try {
+                ack.result = runAiCommand(cmd)
+              } catch (error) {
+                ack.ok = false
+                ack.result = { error: error && error.message ? error.message : String(error) }
+              }
+              // 回执不等待：失败也不影响下一条
+              fetch(aiChannelUrl("-voxel-ack"), {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(ack),
+                cache: "no-store",
+              }).catch(() => {})
+            }
+          })
+          .catch(() => { finish(false) })
+      }
+
+      // 执行一条来自 AI 的命令。返回结构化结果（会原样回给 AI）。
+      function runAiCommand(cmd) {
+        const vp = win.__voxelPass
+        if (!vp) return { error: "voxel engine not ready (open the voxel continent first)" }
+        const op = cmd.op
+        const p = cmd.payload || {}
+
+        if (op === "build") {
+          const text = String(p.commands || p.text || "")
+          if (!text.trim()) return { error: "empty commands" }
+          // saveAs：建完自动存图纸。去重/版本/命名/清理全在引擎侧做，
+          // AI 只决定「存不存」这一件事。
+          const saveAs = p.saveAs ? String(p.saveAs) : null
+          const r = vp.submitAI(text, p.buildId || "ai", saveAs)
+          if (!r || !r.ok) return { error: "parse failed", details: r ? r.errors : null }
+          if (typeof startAiProgress === "function") startAiProgress()
+          return {
+            accepted: r.accepted,
+            total: r.total,
+            errors: r.errors || [],
+            willSaveAs: saveAs,
+          }
+        }
+
+        if (op === "demolish") {
+          const which = String(p.which || "all")
+          if (which === "all") {
+            const r = vp.demolishAll()
+            refreshVoxelHud()
+            return { mode: "all", ...r }
+          }
+          // 按 buildId 拆一栋
+          const r = vp.demolishBuilding(String(p.id || ""))
+          refreshVoxelHud()
+          return { mode: "building", ...(r || {}) }
+        }
+
+        if (op === "query") {
+          const s = vp.stats ? vp.stats() : null
+          const w = vp.allWarehouses ? vp.allWarehouses() : null
+          // 【必须带上建筑列表】
+          // 没有它，AI 想转某栋楼时不知道 id 是什么 ——
+          // 只能瞎猜，或者让用户去界面上看。那等于这个能力对 AI 不存在。
+          const buildings = vp.listBuildingRots ? vp.listBuildingRots() : []
+          // 【必须带上引擎自身的状态】
+          // 没有它，「世界是空的」和「世界有东西但没画出来」分不开 ——
+          // 前者是数据问题，后者是开关或渲染问题，修法完全不同。
+          return {
+            stats: s,
+            warehouses: w,
+            ai: vp.aiStatus ? vp.aiStatus() : null,
+            buildings,
+            engine: {
+              ready: !!vp.ready,
+              visible: !!vp.visible,
+              parts: vp.getParts ? vp.getParts() : null,
+            },
+          }
+        }
+
+        if (op === "place") {
+          const r = vp.placeBlueprint(String(p.name || ""))
+          refreshVoxelHud()
+          return r ? { placed: r } : { error: "cannot place (occupied or out of bounds)" }
+        }
+
+        if (op === "macroRun") {
+          // 新版 macro 支持参数覆盖：p.params 会盖掉宏的默认参数，
+          // 同一个宏就能建到不同位置（补丁 7 的「共享宏原语」）。
+          const r = vp.macros && vp.macros.run
+            ? vp.macros.run(String(p.name || ""), p.params || null)
+            : null
+          if (!r) return { error: "macro not found" }
+          if (typeof startAiProgress === "function") startAiProgress()
+          return { ran: r.accepted, total: r.total, macro: r.macro || null }
+        }
+
+        if (op === "merge") {
+          // 固化：把多个零散建筑合成一个整体，可选同时存图纸。
+          // 合并后它们共享一个 buildId —— 拖、转、拆存图纸都按整栋算。
+          const ids = Array.isArray(p.ids) ? p.ids : (p.id ? [p.id] : null)
+          if (!ids || !ids.length) return { error: "ids required" }
+          const r = vp.mergeBuildings
+            ? vp.mergeBuildings(ids, p.targetId || null, p.saveName || null)
+            : null
+          return r || { error: "merge not available" }
+        }
+
+        if (op === "blueprintRemove") {
+          // 删一张图纸。AI 建完试作品、或者图纸仓库堆了一堆废料时用。
+          // 不给 name 就删全部（dangerous，要显式传 all:true）。
+          const nm = String(p.name || "")
+          if (p.all === true || nm === "all") {
+            const list = vp.listBlueprints ? vp.listBlueprints() : []
+            let n = 0
+            for (const b of list) if (vp.removeBlueprint(b.name)) n++
+            return { removed: n, names: list.map((b) => b.name) }
+          }
+          if (!nm) return { error: "name required (or pass all:true to clear)" }
+          const ok = vp.removeBlueprint ? vp.removeBlueprint(nm) : false
+          return { removed: ok ? 1 : 0, name: nm }
+        }
+
+        if (op === "macroRemove") {
+          // 删一个宏。保存时中文编码出问题的残留、或者过时的宏，需要能清掉。
+          const nm = String(p.name || "")
+          if (!nm) return { error: "name required" }
+          const ok = vp.macros && vp.macros.remove ? vp.macros.remove(nm) : false
+          return { removed: ok, name: nm }
+        }
+
+        if (op === "macroSave") {
+          // 签名升级：save(name, template, params, desc)
+          // template 里用 {参数名} 占位，params 给默认值。
+          const r = vp.macros && vp.macros.save
+            ? vp.macros.save(p.name, p.template || p.text, p.params || {}, p.desc || "")
+            : null
+          return r && r.error ? { error: r.error, details: r.errors } : { saved: r }
+        }
+
+        if (op === "reset") {
+          const n = vp.resetWorld ? vp.resetWorld() : null
+          refreshVoxelHud()
+          return { reset: n }
+        }
+
+        if (op === "scene") {
+          // 跑内置场景（pavilion / boat），并且【逐帧生长】。
+          //
+          // 【为什么要走这条而不是我手写 box 指令】
+          // buildPavilion() 用的是相对中心的偏移量，格子精度一变它自己就适配。
+          // 我手写 box 时得把每个坐标按新格数翻倍 —— 算了两次都算错，
+          // 形状是歪的、块数也不对。让函数自己算，就不会有这个问题。
+          //
+          // 【怎么做到逐帧】
+          // 这些函数是直接 setVoxel 一次摆完的。所以：
+          //   1. 先在引擎里把坐标「算成列表」（不落地）
+          //   2. 列表进 AI 队列
+          //   3. pumpAI 每帧放 PER_FRAME 块
+          const name = String(p.name || 'pavilion')
+          const w = vp.world()
+          const cx = Number.isFinite(p.x) ? Math.trunc(p.x) : Math.floor(w.gridX / 2)
+          const cz = Number.isFinite(p.z) ? Math.trunc(p.z) : Math.floor(w.gridZ / 2)
+          if (typeof vp.scenePlan !== 'function') {
+            return { error: "engine update needed: scenePlan() not available yet" }
+          }
+          const r = vp.scenePlan(name, cx, cz)
+          if (!r) return { error: "unknown scene: " + name + " (use pavilion or boat)" }
+          if (!r.ok) return { error: r.error || "scene plan failed" }
+          if (typeof startAiProgress === "function") startAiProgress()
+          return { scene: name, at: [cx, cz], commands: r.commands, total: r.total }
+        }
+
+        if (op === "rotate") {
+          // 只转建筑，不动世界。90° 吸附。
+          const bid = String(p.building || "")
+          if (!bid) return { error: "building id required" }
+          if (!vp.setBuildingRot) return { error: "engine update needed: setBuildingRot()" }
+          const r = vp.setBuildingRot(bid, Number(p.degrees))
+          if (!r || !r.ok) return { error: (r && r.error) || "rotate failed" }
+          return r
+        }
+
+        if (op === "move") {
+          // 平移一栋建筑。只动这一栋，世界和别的建筑不动。
+          const bid = String(p.building || "")
+          if (!bid) return { error: "building id required" }
+          const dx = Number(p.dx) || 0
+          const dz = Number(p.dz) || 0
+          if (p.check) {
+            if (!vp.canMoveBuilding) return { error: "engine update needed: canMoveBuilding()" }
+            return vp.canMoveBuilding(bid, dx, dz)
+          }
+          if (!vp.setBuildingOffset) return { error: "engine update needed: setBuildingOffset()" }
+          const r = vp.setBuildingOffset(bid, dx, dz)
+          if (!r || !r.ok) return { error: (r && r.error) || "move failed", details: r }
+          return r
+        }
+
+        if (op === "catalog") {
+          // 封装仓库目录。
+          //   name 给了 → 只返回这一个的完整信息（省 token）
+          //   没给     → 返回目录：名字 + 说明 + 参数名，不带模板
+          // 模板动辄几百字符，一上来全拉会把会话预算吃光，所以分级。
+          const name = p.name ? String(p.name) : null
+          if (name) {
+            const d = vp.macros && vp.macros.detail ? vp.macros.detail(name) : null
+            if (!d) return { error: "macro not found: " + name }
+            return { macro: d }
+          }
+          const macros = vp.macros && vp.macros.list ? vp.macros.list(p.detail === true) : []
+          const w = vp.allWarehouses ? vp.allWarehouses() : null
+          const blueprints = w && Array.isArray(w.blueprints)
+            ? w.blueprints.map((b) => ({ name: b.name, blocks: b.count, size: b.size }))
+            : []
+          return { macros, blueprints }
+        }
+
+        if (op === "rate") {
+          // 生长速度：每帧放多少块。
+          // 60fps 下：每帧 2 块 = 120 块/秒（看得清一块块垒）
+          //          每帧 60 块 = 3600 块/秒（现在，几乎瞬间）
+          // 返回改完的值，方便确认真的改了。
+          const n = Number(p.perFrame)
+          if (!Number.isFinite(n) || n <= 0) return { error: "perFrame must be a positive number" }
+          const applied = vp.setAiRate ? vp.setAiRate(n) : null
+          return { perFrame: applied, blocksPerSecond: applied ? applied * 60 : null }
+        }
+
+        if (op === "listBuildings") {
+          const s = vp.stats ? vp.stats() : null
+          return { buildings: s ? s.buildings : 0 }
+        }
+
+        return { error: "unknown op: " + op }
+      }
+
+      // 开场：启动轮询。
+      // 【不在加载时立刻开】—— 第一版就是这里出了问题：
+      // 插件一装就每 400ms 打一次 GET，通道 404 的时候浏览器被刷满，
+      // 整个页面卡住，用户看到的是「几个界面都显示不出来」。
+      // 现在：延迟 2 秒启动，而且失败会退让（见 aiChannelTick）。
+      try {
+        scheduleAiPoll(2000)
+      } catch (error) { /* 定时器不可用就算了 */ }
+
       function restorePageBackground() {
         if (glassSaved === null) return;
         for (const entry of glassSaved) {
@@ -3386,6 +6175,10 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         // 每次重新启动都重建 <script>：上一次 stopOcean() 可能已经把旧的摘掉了。
         // 参数必须在插入前写好，引擎是同步执行的（async=false），会立刻读 window.__ossParams。
         if (oceanScript && oceanScript.parentNode) oceanScript.parentNode.removeChild(oceanScript);
+        // 方块大陆模块必须先加载：它自己把 window.__voxelPass 挂上，
+        // ocean-engine 在主链路里取这个句柄（取不到就整层跳过）。
+        // 顺序是硬要求 —— 引擎是 async=false 同步执行的，必须先有句柄再有引擎。
+        startVoxelModule();
         oceanScript = doc.createElement("script");
         win.__ossParams = oceanParams(settings);
         // 加一个递增的 run 计数：浏览器对同一个 src 的 <script> 会吃缓存，
@@ -3409,7 +6202,41 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         (doc.head || doc.documentElement).appendChild(oceanScript);
       }
 
+      // 方块大陆模块（static/voxel-terrain.js）单独加载。
+      // 它是可选层：加载失败只是方块大陆不可用，海和天照常 —— 所以这里
+      // 不把它的失败算进 oceanState，也不动 oceanStarted。
+      // 每次重启都换 URL（和引擎同一个理由：吃完缓存就不会重新执行）。
+      let voxelScript = null;
+      let voxelRun = 0;
+      function startVoxelModule() {
+        // 上一份先摘掉：模块自己有重入保护，但连 <script> 一起换更干净。
+        if (voxelScript && voxelScript.parentNode) voxelScript.parentNode.removeChild(voxelScript);
+        voxelScript = doc.createElement("script");
+        voxelRun += 1;
+        voxelScript.src = `${ASSET_BASE}voxel-terrain.js?v=${VERSION}&run=${voxelRun}`;
+        voxelScript.async = false;
+        voxelScript.addEventListener("error", () => {
+          console.warn("[Open Sea Shelter] voxel-terrain.js failed to load, voxel disabled");
+        });
+        (doc.head || doc.documentElement).appendChild(voxelScript);
+      }
+      function stopVoxelModule() {
+        // 模块自己的 dispose 由引擎的 __ossDispose 负责调用（它在 engine 里持有句柄）。
+        // 这里只摘 <script> 标签。
+        if (voxelScript) {
+          voxelScript.remove();
+          voxelScript = null;
+        }
+      }
+
       function stopOcean() {
+        // 【先补底，再摘 canvas】
+        // 顺序是硬要求：页面背景被 paintGlass 设成了 transparent（让海面透出来），
+        // 一旦 canvas 被摘掉而背景还是透明的，底下 DSH 的原始底色就直接露出来 ——
+        // 深色模式露黑、浅色模式露白，就是用户看到的「闪黑屏 / 闪白屏」。
+        // 所以这里必须在 remove canvas 之前，把页面背景恢复成不透明，
+        // 让「没有 canvas」这个状态看起来和「有 canvas」一样，而不是闪一下。
+        try { restorePageBackground(); } catch (error) { /* 背景已经恢复过 */ }
         // 先让引擎自己停掉 raf、摘掉监听、摘掉 canvas。
         // 只 remove <script> 是不够的：脚本里的循环和 canvas 还活着。
         if (typeof win.__ossDispose === "function") {
@@ -3422,6 +6249,9 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         }
         if (oceanScript) oceanScript.remove();
         oceanScript = null;
+        // 方块大陆模块也要一起摘。它的 GL 资源和鼠标监听由引擎的 __ossDispose
+        // 顺带清掉（引擎持有句柄并调 dispose），这里只摘 <script> 标签。
+        stopVoxelModule();
         // 兜底：引擎 dispose 失败时它自己的 canvas 会留在页面上，这里再摘一次。
         for (const stale of doc.querySelectorAll("canvas[data-oss-canvas]")) stale.remove();
         oceanStarted = false;
@@ -3467,6 +6297,24 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         const on = current.groundVisible === true;
         if (typeof win.__ossGroundVisible === "function") {
           try { win.__ossGroundVisible(on); } catch (error) { /* 下一拍重试 */ }
+        }
+        // 方块大陆：每拍补推一次（引擎脚本是异步加载的，第一拍常还没挂上接口）。
+        // 和草地同一个位置、同一个形状；它自己不参与天气驱动，所以下面
+        // setDriveTerrain 那一步不受影响 —— 方块大陆不改变天气物理。
+        if (typeof win.__ossVoxelVisible === "function") {
+          try { win.__ossVoxelVisible(current.voxelVisible === true); } catch (error) { /* 下一拍重试 */ }
+        }
+        // AI 建造台的显隐跟着 voxelVisible 走。
+        // 放在这里是因为 pushGround 每 500ms 一拍，是「设置变了」的天然收敛点；
+        // updateAiPanel 自己是幂等的（已在目标状态就什么都不做）。
+        try { updateAiPanel() } catch (error) { /* 界面还没建好 */ }
+        // 两个子开关：底座和建筑。每拍补推一次（引擎异步加载，第一拍常没挂上）。
+        // 两个都关时引擎会自己把整层退场，并把 showVoxel 改成 false —— 那是对的。
+        if (typeof win.__ossVoxelPart === "function") {
+          try {
+            win.__ossVoxelPart("plate", current.voxelPlate !== false);
+            win.__ossVoxelPart("build", current.voxelBuild !== false);
+          } catch (error) { /* 下一拍重试 */ }
         }
         // ---- 天气联动：地形切换 ----
         // 草地开着时，天气驱动层改用 grass 那套标签（蒸发率/热容/凝结核/落点）。
@@ -4111,6 +6959,29 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         '</div>',
         '</div>',
         '</div>',
+        // ---- 方块大陆（第三块地形）----
+        // 只做线条骨架：三维整数格子 + 可 360 度环绕的相机。方块放置是下一步。
+        // 和海面/草地互斥：勾上之后引擎强制不画海和草，取消勾选后两者原样回来。
+        '<div class="oss-section"><div class="oss-section-title">🧱 创世大陆</div>',
+        '<div class="oss-switch"><label for="oss-voxel-visible">启用创世大陆</label>',
+        '<input type="checkbox" id="oss-voxel-visible" /></div>',
+        // 两个子开关：底座（大陆本身）和建筑，各自独立。
+        //   · 关掉底座 → 建筑悬在海面/草地上 = 「降临」效果
+        //   · 关掉建筑 → 只剩一块空工地
+        //   · 两个都关 → 整层退场（这里会自动把上面的总开关取消）
+        '<div class="oss-switch"><label for="oss-voxel-plate">展示大陆</label>',
+        '<input type="checkbox" id="oss-voxel-plate" checked /></div>',
+        '<div class="oss-switch"><label for="oss-voxel-build">展示建筑</label>',
+        '<input type="checkbox" id="oss-voxel-build" checked /></div>',
+        '<p class="oss-note">关掉「展示大陆」可以看到建筑悬在草地/海面上。两个都关就等于整层不存在。</p>',
+        // 方块测试：验证格子存储 + 内部面剔除 + 颜色调色板。
+        // 这一步只证明「能放方块、能看见」，放置/编辑交互是下一步。
+        '<div class="oss-switch"><label for="oss-voxel-box">试放一块</label>',
+        '<input type="checkbox" id="oss-voxel-box" /></div>',
+        '<p class="oss-note" id="oss-voxel-stat"></p>',
+        // 收纳 / 放回按钮不放这里 —— 它们属于「世界里」的操作，
+        // 出在世界画面右下角（和「回到界面」并排），见 setImmersive。
+        '</div>',
         // ---- 主体模块（试验阶段）----
         // 默认开。关掉就回到纯天气沙盒 —— 没有人看着你。
         '<div class="oss-section"><div class="oss-section-title">主体模块 <span style="opacity:.55;font-weight:400">（试验阶段）</span></div>',
@@ -4143,6 +7014,11 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       const enabledBox = q("#oss-enabled");
       const seaVisibleBox = q("#oss-sea-visible");
       const groundVisibleBox = q("#oss-ground-visible");
+      const voxelVisibleBox = q("#oss-voxel-visible");
+      const voxelPlateBox = q("#oss-voxel-plate");
+      const voxelBuildBox = q("#oss-voxel-build");
+      const voxelBox = q("#oss-voxel-box");
+      const voxelStat = q("#oss-voxel-stat");
       const groundDensityRange = q("#oss-ground-density");
       const groundDensityValue = q("#oss-ground-density-value");
       const flowerDensityRange = q("#oss-flower-density");
@@ -5565,6 +8441,9 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         enabledBox.checked = current.enabled;
         if (seaVisibleBox) seaVisibleBox.checked = current.seaVisible !== false;
         if (groundVisibleBox) groundVisibleBox.checked = current.groundVisible === true;
+        if (voxelVisibleBox) voxelVisibleBox.checked = current.voxelVisible === true;
+        if (voxelPlateBox) voxelPlateBox.checked = current.voxelPlate !== false;
+        if (voxelBuildBox) voxelBuildBox.checked = current.voxelBuild !== false;
         if (groundDensityRange) groundDensityRange.value = String(current.groundDensity);
         if (groundDensityValue) groundDensityValue.textContent = current.groundDensity + "%";
         if (flowerDensityRange) flowerDensityRange.value = String(current.flowerDensity);
@@ -6340,6 +9219,105 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           pushGround();
         });
       }
+      // 方块大陆：勾上就【自动进入壁纸与交互模式】。
+      // 理由：方块世界的整个画面都靠鼠标拖转，而 DSH 的界面层压在上面，
+      // 不进入沉浸态的话鼠标点到的永远是对话框和面板，转不了世界。
+      // 所以顺序是：「勾选」→ 关掉面板 → 进沉浸 → 方块层接管鼠标。
+      // 互斥（不画海和草）由引擎那边落实，这里不动海面/草地的勾选框。
+      if (voxelVisibleBox) {
+        voxelVisibleBox.addEventListener("change", () => {
+          const on = voxelVisibleBox.checked;
+          commit({ voxelVisible: on });
+          if (on) {
+            // 【打开总开关时，两个子开关至少开一个】
+            // 如果两个都是关的，打开总开关会看到「什么都没有」——
+            // 引擎那边 setPart 立刻又把整层退了，表现就是「点了没反应」。
+            // 所以这里把两个都打开，用户进来至少能看到完整的大陆。
+            const cur = readSettings();
+            if (cur.voxelPlate === false && cur.voxelBuild === false) {
+              commit({ voxelPlate: true, voxelBuild: true });
+              if (voxelPlateBox) voxelPlateBox.checked = true;
+              if (voxelBuildBox) voxelBuildBox.checked = true;
+            }
+            // 先进沉浸把界面让开，再关面板 —— 反过来会让焦点落在一个已经隐藏的面板上。
+            setImmersive(true);
+            setOpen(false);
+          }
+          pushGround();
+        });
+      }
+      // 网格开关：只 commit + 推送。它不影响沉浸态，也不触发进出。
+      // 两个子开关：各自 commit + 推送。
+      // 【都关掉 = 整个创世大陆关掉】这一条在这里落地：
+      // 用户说「两个都关掉，这个创世大陆就默认是关掉了」——
+      // 所以两个子开关都变成 false 时，连总开关一起取消勾选，
+      // 让面板上的状态和引擎里的状态一致，而不是「总开关亮着但什么都看不到」。
+      function syncVoxelMaster() {
+        const plate = voxelPlateBox ? voxelPlateBox.checked : true;
+        const build = voxelBuildBox ? voxelBuildBox.checked : true;
+        if (plate || build) return;
+        if (voxelVisibleBox && voxelVisibleBox.checked) {
+          voxelVisibleBox.checked = false;
+          commit({ voxelVisible: false });
+        }
+      }
+      if (voxelPlateBox) {
+        voxelPlateBox.addEventListener("change", () => {
+          commit({ voxelPlate: voxelPlateBox.checked });
+          syncVoxelMaster();
+          pushGround();
+        });
+      }
+      if (voxelBuildBox) {
+        voxelBuildBox.addEventListener("change", () => {
+          commit({ voxelBuild: voxelBuildBox.checked });
+          syncVoxelMaster();
+          pushGround();
+        });
+      }
+      // 试放空心盒：勾上放一个 8x8x8 的空心壳，取消就清空。
+      // 直接调模块接口，不走设置存储 —— 这是一次性验证工具，不是用户配置。
+      // 引擎脚本是异步加载的，第一拍可能还没挂上 __voxelPass，
+      // 所以这里要自己兜住「模块还没起来」的情况。
+      if (voxelBox) {
+        voxelBox.addEventListener("change", () => {
+          const on = voxelBox.checked;
+          let vp = null;
+          try { vp = win.__voxelPass; } catch (error) { /* 模块没起来 */ }
+          if (!vp || typeof vp.buildTestBox !== "function") {
+            console.warn("[Open Sea Shelter] voxel module not ready, retry in 1s");
+            win.setTimeout(() => {
+              try {
+                const v2 = win.__voxelPass;
+                if (!v2) return;
+                if (on && typeof v2.buildTestBox === "function") v2.buildTestBox();
+                else if (!on && typeof v2.clearVoxels === "function") v2.clearVoxels();
+                updateVoxelStat();
+              } catch (error) { /* 忽略 */ }
+            }, 1000);
+            return;
+          }
+          try {
+            if (on) vp.buildTestBox();
+            else vp.clearVoxels();
+          } catch (error) {
+            console.warn("[Open Sea Shelter] test box failed", error);
+          }
+          updateVoxelStat();
+        });
+      }
+      // 统计行：块数 / 可见实例数。放在面板上，方便直接看剔除效果。
+      function updateVoxelStat() {
+        if (!voxelStat) return;
+        try {
+          const vp = win.__voxelPass;
+          if (!vp || typeof vp.stats !== "function") { voxelStat.textContent = ""; return; }
+          const s = vp.stats();
+          voxelStat.textContent = s.total > 0
+            ? "方块 " + s.total + " 块 · 可见 " + s.visible + " 个实例"
+            : "";
+        } catch (error) { /* 忽略 */ }
+      }
       if (groundDensityRange) {
         groundDensityRange.addEventListener("input", () => {
           commitLive({ groundDensity: Number(groundDensityRange.value) }, "user");
@@ -6610,9 +9588,13 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
       // 只在沉浸态（壁纸与交互）生效：其他模式玩家在调参，不该被误触。
       let lastPetScreen = null;      // 每帧由 place 之外的地方更新太贵，这里按需取
       const onSkyClick = (e) => {
-        // 诊断用：确认这个监听到底有没有被调用、immersive 是什么值
-        console.log("[sky] click", { immersive, tx: e.clientX, ty: e.clientY, target: e.target && e.target.tagName });
         if (!immersive) return;
+        // 【方块大陆开着时，点地面是「铺砖」，不是「让鱼走过去」】
+        // 这一条是必须的：不然在方块世界里每点一下地板，鱼就会往那边跑，
+        // 同时砖也放下去了 —— 玩家只是想铺地，结果鱼满场乱窜。
+        // 点鱼本身（下面那段命中判定）仍然保留，因为和建筑不冲突。
+        let building = false;
+        try { building = readSettings().voxelVisible === true; } catch (error) { building = false; }
         // 点在面板 / 按钮上就不算（它们自己有处理）
         if (e.target && e.target.closest && e.target.closest("button, input, .oss-dream, .oss-panel, .oss-subpanel")) return;
         let pt = null;
@@ -6634,6 +9616,12 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           try { petScheduler.react(); } catch (error) { /* 调度器没起来 */ }
           return;
         }
+        // 【方块大陆开着：没点中鱼，就到此为止】
+        // 剩下的分支是「点地面 → 鱼走过去」，那是看风景模式的玩法。
+        // 建造模式下点地面归建造逻辑管（铺砖），鱼不该被点一下就跑。
+        // 注意这里在捕获阶段 return 掉，建造那边是冒泡阶段 ——
+        // 它的 pointerdown 仍然会收到事件，所以砖照铺。
+        if (building) return;
         // 点别处：让它走到鼠标落点正下方的地面上。
         // 精确做法是反投影射线求地面交点（引擎里的 __ossScreenToGround），
         // 拿到的是世界坐标，再换算成鱼用的「横向偏移 + 离相机米数」。
@@ -6641,9 +9629,34 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
           if (typeof win.__ossScreenToGround !== "function") return;
           const g = win.__ossScreenToGround(e.clientX, e.clientY);
           if (!g || !Number.isFinite(g.x) || !Number.isFinite(g.z)) return;
-          // 世界 z → 对外「离相机的米数」：dist = 8.5 - (worldZ - 8.5) = 17 - worldZ
-          const dist = 17 - g.z;
-          const z = Math.max(4.8, Math.min(40, dist));
+          // 世界 z → 对外「离相机的米数」。
+          // **必须问引擎要**：主世界 dist = 17 - worldZ（相机在 z=17），
+          // 方块世界 dist = 48 - worldZ（相机在 z=52，底板 ±48），两套方向完全不同。
+          // 以前这里写死 17 - g.z，所以方块模式下点地面时鱼会往反方向走/被钳在半路。
+          let dist = NaN;
+          try {
+            if (typeof win.__ossPetDistFromWorldZ === "function") {
+              dist = win.__ossPetDistFromWorldZ(g.z);
+            }
+          } catch (error) { /* 用下面的兜底 */ }
+          if (!Number.isFinite(dist)) dist = 17 - g.z;
+          // 纵深范围：**只问引擎要**，不在客户端重算。
+          // 引擎的 __ossPetDistRange() 会按当前模式给 {min,max}：
+          //   主世界 2.8~55；方块大陆 1.5~94.5（整块 96 米底板）。
+          // 以前这里自己写 4.8~40、后来又写了 0.5~63，都是猜的，
+          // 所以「只能走一半」一直修不干净 —— 现在只有一个来源。
+          let zMin = 4.8;
+          let zMax = 40;
+          try {
+            if (typeof win.__ossPetDistRange === "function") {
+              const r = win.__ossPetDistRange();
+              if (r && Number.isFinite(r.min) && Number.isFinite(r.max)) {
+                zMin = r.min;
+                zMax = r.max;
+              }
+            }
+          } catch (error) { /* 用默认 */ }
+          const z = Math.max(zMin, Math.min(zMax, dist));
           let halfW = 3;
           try {
             if (typeof win.__ossPetHalfWidth === "function") halfW = win.__ossPetHalfWidth(z);
@@ -6682,16 +9695,39 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         const STEP_X = 1.4, STEP_Z = 1.6;
         if (k === "ArrowUp") z += STEP_Z;        // 远离镜头 = 往画面里
         if (k === "ArrowDown") z -= STEP_Z;      // 走近
-        if (k === "ArrowLeft") x -= STEP_X;
-        if (k === "ArrowRight") x += STEP_X;
+        // 【左右要反着加，别按直觉写】
+        // 推导（ocean-engine.js 的 mat4.lookAt）：
+        //   右向量 s = up × fwd，相机朝 -z 时 fz < 0 → s.x = fz < 0。
+        //   屏幕横向 NDC_x ∝ dot(P - eye, s)，所以【世界 x 增大 = 屏幕向左】。
+        // 行为证据：按左箭头时 x 减小 → 屏幕向【右】走，用户报的就是这个。
+        // 所以「屏幕上向左」= 世界 x 增大 = x += STEP_X。
+        if (k === "ArrowLeft") x += STEP_X;
+        if (k === "ArrowRight") x -= STEP_X;
         let halfW = 3;
         try {
           if (typeof win.__ossPetHalfWidth === "function") halfW = win.__ossPetHalfWidth(z);
         } catch (error) { /* 用默认 */ }
         x = Math.max(-halfW, Math.min(halfW, x));
-        z = Math.max(4.8, Math.min(40, z));
+        // 纵深钳制：同样只问引擎要范围（和点击寻路完全一致）。
+        let zMin = 4.8;
+        let zMax = 40;
+        try {
+          if (typeof win.__ossPetDistRange === "function") {
+            const r = win.__ossPetDistRange();
+            if (r && Number.isFinite(r.min) && Number.isFinite(r.max)) {
+              zMin = r.min;
+              zMax = r.max;
+            }
+          }
+        } catch (error) { /* 用默认 */ }
+        z = Math.max(zMin, Math.min(zMax, z));
         try {
           petEntity.moveTo(x, z, 0.5);
+          // 朝向也要跟着走：只横向移动时才转身，上下移动不转身（否则原地掉头很怪）。
+          // face(dir) 的约定：dir < 0 → 面朝右；dir > 0 → 面朝左。
+          // 世界 x 增大 = 屏幕向左（见上面左右键那段推导），所以 x 增大传 +1。
+          if (k === "ArrowLeft") petEntity.face(1);
+          else if (k === "ArrowRight") petEntity.face(-1);
           petScheduler.reactWalk();
         } catch (error) { /* 引擎没起来 */ }
       };
@@ -6993,14 +10029,20 @@ body[data-ds-dark-theme] .oss-subpanel .oss-section-title { color: #e8b64a; }
         try { petEntity.dispose(); } catch (error) { /* 同上 */ }
         try { petScheduler.dispose(); } catch (error) { /* 同上 */ }
         try { dream.dispose(); } catch (error) { /* 同上 */ }
+        // 【dispose 也要清所有派生节点】
+        // 原来只移 fab / panel / pane 三个。
+        // 但 -ai（按钮条）、-help（说明书）、-hotbar、-voxel-hud 都是
+        // "P-xxx" 形式的派生 id，不属于这三个变量，
+        // 插件卸载后它们会留在页面上变成幽灵按钮。
         for (const node of [fab, panel, pane]) if (node.parentNode) node.parentNode.removeChild(node);
+        for (const stale of doc.querySelectorAll('[id^="' + IDS.pane + '"]')) stale.remove();
         if (uiStyle.parentNode) uiStyle.parentNode.removeChild(uiStyle);
         clearGlass();
       };
     }
 
     exports.name = PLUGIN;
-    exports.inject = ["theme"];
+    exports.inject = ["theme", "sessions", "uiWorkspace"];
     exports.apply = apply;
     return module.exports;
   },

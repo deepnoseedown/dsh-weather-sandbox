@@ -37,9 +37,30 @@ let renderScale = 1
 let starBright = Q.has('starBright') ? Math.min(1, Math.max(0, Number(Q.get('starBright')) || 0.55)) : 0.55
 
 const canvas = document.createElement('canvas')
+// 【取消淡入 —— 这是「闪黑屏 / 闪白屏」的根因】
+//
+// 原来这里写死 opacity:0 + transition 1.4s。淡入期间 canvas 是半透明的，
+// 底下就是 HTML 页面本身：深色主题露黑、浅色主题露白，于是用户看到
+// 「深色模式闪黑、浅色模式闪白」—— 和主题严格对应，正是这个机制。
+//
+// 这份脚本会被反复重新执行（插件开关、客户端每拍同步、版本更新、
+// 甚至 DSH 自己重启桌宠窗口），每执行一次就新建一块 canvas，
+// 每次都重来一遍 1.4 秒的半透明窗口。桌面壁纸场景里这个淡入没有任何
+// 观赏价值，只有「露出一条缝」的副作用，所以直接取消：
+// canvas 一插进 DOM 就是不透明的，第一帧画出来之前也不会透底。
+//
+// 如果将来想要淡入，必须用「先画完第一帧再淡入」的做法，
+// 而不是「先半透明等着画」—— 后者在任何低帧率机器上都会闪。
+//
+// 【background 不写 transparent，写一个中性深色】
+// 第二个空档在这里：canvas 一插进 DOM 就有尺寸了，但第一帧要等
+// requestAnimationFrame 回调才画出来。这中间 canvas 的内容是空的，
+// 如果它是全透明的，露出来的还是下面那层页面 —— 又是一次闪。
+// 给它一个和天空底部接近的中性色，这段时间看到的是一块平整的底色，
+// 而不是「页面闪一下」。第一帧一到就被真正的画面完全盖住。
 canvas.style.cssText =
   'display:block;position:fixed;inset:0;width:100%;height:100%;' +
-  'opacity:0;transition:opacity 1.4s ease;pointer-events:none;background:transparent'
+  'opacity:1;pointer-events:none;background:#1a1f28'
 canvas.setAttribute('data-oss-canvas', '')
 document.body.insertBefore(canvas, document.body.firstChild)
 
@@ -65,6 +86,12 @@ const gl = canvas.getContext('webgl2', {
 
 if (!gl) {
   console.error('[OPEN SEA SKIN] WebGL2 unavailable')
+  // 【WebGL 不可用时必须把 canvas 摘掉】
+  // 上面给 canvas 设了不透明底色 #1a1f28（为了不让首帧前透底）。
+  // 如果这里得不到 GL 上下文，这块 canvas 永远画不出任何东西，
+  // 那块底色就会变成一块盖住整个屏幕的黑板。所以这个分支里直接摘了它，
+  // 让页面回到「没有这个插件」的样子。
+  if (canvas.parentNode) canvas.parentNode.removeChild(canvas)
   document.body.classList.add('ready')
 } else {
   main()
@@ -81,6 +108,12 @@ function main() {
   let boltPass = null
   // 大肥鱼 Pass：客户端通过 window.__ossPetTexture 交纹理进来
   let petPass = null
+  // 方块大陆线条骨架：独立模块，由 static/voxel-terrain.js 自己挂到 window.__voxelPass。
+  // 这里不 import、不构建，只查句柄在不在 —— 模块没加载时它是 null，整个方块层跳过。
+  let voxelPass = null
+  // 方块大陆和海洋/草地互斥：开着方块，海面和草地一律不画。
+  // 理由：线条骨架在纯白背景上才分得清哪根是网格、哪根是草的轮廓。
+  let showVoxel = false
   // 大肥鱼每帧的朝向/尺寸/抬起量，由客户端通过 __ossPetSet 推进来。
   // 缺省值就是「立正站着、面朝左、不抬」，所以引擎不知道客户端也没关系。
   // x 是当前的横向位置（米），每帧朝 petMoveTarget 逼近。
@@ -3410,6 +3443,28 @@ function main() {
     petPass = null
   }
 
+  // 方块大陆：线条骨架由 static/voxel-terrain.js 自己挂到 window.__voxelPass。
+  // 这里只取句柄、把 canvas 交给它（挂鼠标要用）、初始化 GL 资源。
+  // 和上面的 Pass 同一套隔离策略：它挂了，海和天照常。
+  try {
+    voxelPass = window.__voxelPass || null
+    if (voxelPass) {
+      voxelPass.bindCanvas(canvas)
+      if (!voxelPass.init(gl)) voxelPass = null
+    }
+    // 【初始化完成后必须重放一次开关状态】
+    // 时序问题：客户端每 500ms 就推一次 __ossVoxelVisible(true)，但那时的
+    // 引擎还没加载完（脚本是异步插入的），voxelPass 还是 null，那次调用
+    // 只改了 showVoxel 就返回了，setVisible / attachInput 一次都没跑过。
+    // 等这里终于 init 成功时，visible 仍然是 false —— 表现就是
+    // 「线条画得出来（那只看 showVoxel），但鼠标拖不动（那要看 visible）」。
+    // 这一句补上那次丢失的调用；没开方块时 setVisible(false) 是幂等的，无害。
+    if (voxelPass) voxelPass.setVisible(showVoxel)
+  } catch (error) {
+    console.error('[OPEN SEA SKIN] voxel pass failed, voxel disabled', error)
+    voxelPass = null
+  }
+
   // ======================================================================
   //  大肥鱼 Pass —— 真正画进场景里
   //
@@ -3462,17 +3517,67 @@ function main() {
     return h * 0.55 + 2.20
   }
 
+  // ============================================================
+  //  角色坐标换算（模块级）—— 全项目只此一处
+  // ============================================================
+  // 这些常量原本写在 createPetPass() 里面，外面拿不到。现在提到模块级，
+  // 是因为 __ossPetScreen（点击命中判定 + 梦境面板定位）也要用同一套换算。
+  // 写两份的后果是「鱼画在 A 点、点击判定在 B 点」，而且是静默的。
+  const PET_POS = [0, 0.05, 8.5]
+  const PET_HEIGHT = 2.5
+  // 【对外的 z 一律是「距离相机的米数」，不是世界 z】
+  //   镜头看的方向是 -z，所以「离相机越远」= 世界 z 越小，两者方向相反。
+  const CAM_TO_PET = 8.5
+
+  // 把「离相机的米数」变成「世界 z」。两种模式两套公式：
+  //   主世界：  worldZ = 8.5 - (dist - 8.5)        ← 相机在 [0,5.5,17]
+  //   方块大陆：worldZ = HALF - dist               ← 相机在 [0,14,52]，底板 -48..+48
+  // 第二个公式的意义：dist 直接就是「从底板近边往里走多少米」，
+  // dist=0 → worldZ=+48（离相机最近的边），dist=SIZE → worldZ=-48（最远的边）。
+  // 这样整个 96 米都走得到，和相机站在哪儿无关 —— 这正是「只能走一半」的修法。
+  function moduleWorldZ(dist) {
+    if (showVoxel && voxelPass && typeof voxelPass.world === 'function') {
+      try {
+        const w = voxelPass.world()
+        if (Number.isFinite(w.size) && w.size > 0) return w.size * 0.5 - dist
+      } catch (error) { /* 拿不到就退回主世界映射 */ }
+    }
+    return PET_POS[2] - (dist - CAM_TO_PET)
+  }
+
+  // 当前模式下 dist 的合法范围（客户端钳制用，避免两边各写一套边界）。
+  window.__ossPetDistRange = () => {
+    if (showVoxel && voxelPass && typeof voxelPass.world === 'function') {
+      try {
+        const w = voxelPass.world()
+        if (Number.isFinite(w.size) && w.size > 0) {
+          const inset = 1.5
+          return { min: inset, max: w.size - inset }
+        }
+      } catch (error) { /* 退回默认 */ }
+    }
+    return { min: 2.8, max: 55 }
+  }
+
+  // moduleWorldZ 的反函数：世界 z → 「离相机的米数」。
+  // 客户端点地面时拿到的是世界坐标，要换回鱼用的 dist，必须走这个，
+  // 不能自己写「17 - z」—— 那是主世界专用的，方块模式下方向是反的。
+  window.__ossPetDistFromWorldZ = (worldZ) => {
+    if (!Number.isFinite(worldZ)) return NaN
+    if (showVoxel && voxelPass && typeof voxelPass.world === 'function') {
+      try {
+        const w = voxelPass.world()
+        if (Number.isFinite(w.size) && w.size > 0) return w.size * 0.5 - worldZ
+      } catch (error) { /* 退回默认 */ }
+    }
+    return PET_POS[2] + CAM_TO_PET - worldZ
+  }
+
   function createPetPass() {
-    // 角色的基准位置（世界坐标，米）。
-    //   相机 [0,5.5,17] 看向 [0,1.5,0]，FOV 55°。
-    //   x=0 是画面正中；y=0.05 是脚底刚出水面；z=8.5 对应离相机 8.5 米。
-    //   2.5 米高在这个距离上约占屏高 27%，是能看清表情的下限。
-    const PET_POS = [0, 0.05, 8.5]
-    const PET_HEIGHT = 2.5
+    // PET_POS / PET_HEIGHT / CAM_TO_PET 都定义在模块级（见函数上方那段），
+    // 这里不再重复声明 —— 函数内再写一份会遮蔽外层的，两份就分叉了。
     // 【对外的 z 一律是「距离相机的米数」，不是世界 z】
-    //   镜头看的方向是 -z，所以「离相机越远」= 世界 z 越小，两者方向相反。
-    //   只在这一处换算：worldZ = PET_POS[2] - (dist - CAM_TO_PET)。别处不许再翻。
-    const CAM_TO_PET = 8.5
+    //   换算函数 moduleWorldZ() 也在模块级，因为 __ossPetScreen 也要用同一份。
 
     const VS = `#version 300 es
     in vec2 aCorner;
@@ -3650,7 +3755,9 @@ function main() {
 
       gl.uniformMatrix4fv(U.viewProj, false, cam.viewProj)
       const wx = PET_POS[0] + (params && params.x ? params.x : 0)
-      const wz = PET_POS[2] - ((params && params.z ? params.z : 0) - CAM_TO_PET)
+      // 唯一换算点：主世界走 worldZ = 17 - dist；方块世界走 worldZ = HALF - dist。
+      // 别处不许再翻 —— 这里是全项目唯一把「离相机米数」变成「世界 z」的地方。
+      const wz = moduleWorldZ(params && params.z ? params.z : CAM_TO_PET)
       const groundY = petTerrainHeight(wx, wz)
       gl.uniform3f(
         U.origin,
@@ -3934,6 +4041,13 @@ function main() {
 
   function updateCamera() {
     const proj = mat4.perspective(FOV_DEG * Math.PI / 180, W / H, NEAR, FAR)
+    // 方块大陆开着时相机交给它的 Orbit：球坐标绕世界中心，360 度随便转。
+    // 关掉时走下面原来那两行，和改动之前逐字一致 —— 这是「切回海洋就固定」的唯一开关点。
+    if (voxelPass && voxelPass.ready && showVoxel) {
+      const eye = voxelPass.eye()
+      const view = mat4.lookAt(eye, voxelPass.target(), [0, 1, 0])
+      return { eye, viewProj: mat4.mul(proj, view) }
+    }
     const view = mat4.lookAt(CAM_POS, CAM_TARGET, [0, 1, 0])
     return { eye: CAM_POS, viewProj: mat4.mul(proj, view) }
   }
@@ -4002,6 +4116,7 @@ function main() {
     // ---- 海面：只这一段受「显示海面」开关控制 ----
     // 天空已经在上面画完了（含太阳/月亮/星星/云），关掉海面时它保留全部像素，
     // 所以下方不会出现黑块 —— FS_SKY 对每个像素直接算方向颜色，没有海平线裁剪。
+    // 方块大陆开着时强制不画：线条骨架要纯背景才看得清，这是「互斥」方案的落点。
     if (showSea) {
       gl.enable(gl.DEPTH_TEST)
       gl.enable(gl.CULL_FACE)
@@ -4067,6 +4182,7 @@ function main() {
     // ---- 草地：地面底色 + 实例草 ----
     // 排在最后，因为它们要盖在海面之上（草比海面远离/接近相机都可能，靠深度测试决定）。
     // 画完自己还原 GL 状态；grassPass 内部 initOk 会挡住整个 Pass。
+    // 方块大陆开着时同样强制不画（互斥，理由见海面那一段）。
     if (grassPass && showGround) {
       try {
         grassPass.draw({
@@ -4124,6 +4240,42 @@ function main() {
         }, rtScene.fb)
       } catch (error) {
         console.warn('[OPEN SEA SKIN] flower draw failed', error)
+      }
+    }
+
+    // ---- 方块大陆：白玉底座 + 外框 ----
+    // 独立模块（static/voxel-terrain.js）。这里只交两样东西给它：
+    //   cam —— 主视角相机矩阵（它内部的 eye/target 是常量，这里是同一份）
+    //   env —— 主世界的太阳方向/颜色/天顶/地平线色/雾，让它和旁边海草同一个光照
+    // 状态归属：进来时任意，出去时必须回到本函数的约定末态
+    // （BLEND 关、DEPTH_TEST 关、CULL_FACE 关），下游 sunPass / boltPass /
+    // drawBloom / drawComposite 全靠这个末态。所以还原放在 finally 里，
+    // 不写成「正常路径才还原」—— 那样一次抛异常就让整帧错乱。
+    if (voxelPass && voxelPass.ready && showVoxel) {
+      try {
+        gl.enable(gl.DEPTH_TEST)
+        gl.enable(gl.BLEND)
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+        gl.disable(gl.CULL_FACE)
+        voxelPass.draw(cam, {
+          sunDir: env.sunDir,
+          sunColor: env.sunColor,
+          zenith: env.zenith,
+          horizon: env.horizon,
+          fog: groundFog,
+          time: elapsed,
+          // 拾取要用：屏幕坐标 → 世界射线需要 viewProj 的逆矩阵。
+          // 方块模块自己算逆矩阵要再写一份 mat4，不如直接把引擎的给它。
+          vpInv: mat4.invert(cam.viewProj),
+          screenW: W,
+          screenH: H,
+        })
+      } catch (error) {
+        console.warn('[OPEN SEA SKIN] voxel draw failed', error)
+      } finally {
+        gl.disable(gl.BLEND)
+        gl.disable(gl.DEPTH_TEST)
+        gl.disable(gl.CULL_FACE)
       }
     }
   }
@@ -4524,6 +4676,10 @@ function main() {
       // 大肥鱼的 program / VAO / 纹理同样要带走
       try { if (petPass) petPass.dispose() } catch (error) { /* 已经释放 */ }
       petPass = null
+      // 方块大陆的缓冲和程序要带走，鼠标监听也要摘 —— 不摘的话关掉插件后
+      // canvas 上还挂着一份 pointerdown，重新打开会叠成两份。
+      try { if (voxelPass) voxelPass.dispose() } catch (error) { /* 已经释放 */ }
+      voxelPass = null
     },
     () => {
       window.removeEventListener('message', onMessage)
@@ -4614,6 +4770,48 @@ function main() {
   // 关掉海面后这块画面就是完整的天空，其他地形或壁纸可以直接画在自己的层上。
   window.__ossSeaVisible = (on) => { showSea = !!on; return showSea }
   window.__ossSeaState = () => ({ showSea })
+
+  // 方块大陆：线条骨架的显隐。和海面/草地同一个形状，客户端不用区分。
+  // 三方互斥在这一层落实：开方块就强制不画海和草（见 drawScene 的三个判断），
+  // 但不动 showSea / showGround 本身 —— 关掉方块后它们原样回来，用户的面板勾选不被篡改。
+  // 相机不在这里切：updateCamera() 自己查 showVoxel。
+  window.__ossVoxelVisible = (on) => {
+    showVoxel = !!on
+    if (voxelPass) {
+      try { voxelPass.setVisible(showVoxel) } catch (error) { console.warn('[OPEN SEA SKIN] voxel visible failed', error) }
+    }
+    return showVoxel
+  }
+  window.__ossVoxelState = () => ({
+    showVoxel,
+    ready: !!(voxelPass && voxelPass.ready),
+    parts: voxelPass && typeof voxelPass.getParts === 'function' ? voxelPass.getParts() : null,
+    world: voxelPass && typeof voxelPass.world === 'function' ? voxelPass.world() : null,
+  })
+  // 两个子开关：底座（大陆）和建筑。
+  //   plate=false → 建筑悬在海面/草地上（降临效果）
+  //   build=false → 只剩空工地
+  //   两个都关   → 整层退场（相机归还海洋）
+  window.__ossVoxelPart = (part, on) => {
+    if (!voxelPass || typeof voxelPass.setPart !== 'function') return null
+    try {
+      const r = voxelPass.setPart(part, on)
+      // 整层可能因为「两个都关」而退场，同步一下外面这个标记
+      showVoxel = r ? r.visible : showVoxel
+      return r
+    } catch (error) {
+      console.warn('[OPEN SEA SKIN] voxel part failed', error)
+      return null
+    }
+  }
+  // 辅助网格（外框线 + 砖缝）显示开关。底座本身不受影响 —— 那是地面，不是网格。
+  window.__ossVoxelGrid = (on) => {
+    let result = !!on
+    if (voxelPass && typeof voxelPass.setGrid === 'function') {
+      try { result = voxelPass.setGrid(on) } catch (error) { /* 模块没起来 */ }
+    }
+    return result
+  }
 
   // 草地：显隐 + 两个场值（气压、雾）。和海面同一个形状，客户端不用区分。
   window.__ossGroundVisible = (on) => { showGround = !!on; return showGround }
@@ -4767,7 +4965,24 @@ function main() {
     //   近端 2.8 米：再近就只剩一块颜色，虚化也救不回来。
     //   远端 55 米：那是「天边」，屏高约 4%，看不清脸朝哪边 ——
     //   不用换背影素材，光靠距离它就「不看着你」了。
-    if (Number.isFinite(z)) petMoveTarget.z = Math.max(2.8, Math.min(55, z))
+    //
+    // 【两端边界一律从 __ossPetDistRange() 取，不再自己算】
+    // 以前这里写死了 2.8~55；后来改方块模式时又在客户端算了一遍「17+size/2」，
+    // 两套换算口径不同，于是鱼永远只能走到一半。
+    // 现在唯一来源是 __ossPetDistRange()（它和 moduleWorldZ 用的是同一个 w.size）：
+    //   主世界 2.8~55；方块大陆 1.5~94.5。
+    let zMin = 2.8
+    let zMaxLimit = 55
+    try {
+      if (typeof window.__ossPetDistRange === 'function') {
+        const r = window.__ossPetDistRange()
+        if (r && Number.isFinite(r.min) && Number.isFinite(r.max)) {
+          zMin = r.min
+          zMaxLimit = r.max
+        }
+      }
+    } catch (error) { /* 用默认 */ }
+    if (Number.isFinite(z)) petMoveTarget.z = Math.max(zMin, Math.min(zMaxLimit, z))
     petMoveDur = Number.isFinite(duration) && duration > 0 ? duration : 0
     return { x: petMoveTarget.x, z: petMoveTarget.z, dur: petMoveDur }
   }
@@ -4788,6 +5003,21 @@ function main() {
   //   结果贴玻璃时（z=3 米）走到 ±1.8 米就已经半身在画外。
   // 水平半视角 42.8°（FOV 55° 垂直、16:9 宽屏推出来的），tan ≈ 0.926。
   window.__ossPetHalfWidth = (z) => {
+    // 【方块大陆模式：按底板边界走，不按视野走】
+    // 在方块世界里，玩家要的是「鱼能在整块 96x96 底板上走」，
+    // 而不是「鱼只能在镜头看得见的那一片走」。
+    // 方块世界半宽 = SIZE/2 = 48 米，留 2 米边给鱼的半宽和呼吸空间 → 46 米。
+    // 注意这里必须问的是方块模块自己的常量，不能在这里再写一个 48，
+    // 否则以后改底板尺寸会两处不同步。
+    if (showVoxel && voxelPass && typeof voxelPass.world === 'function') {
+      try {
+        const w = voxelPass.world()
+        if (Number.isFinite(w.size)) {
+          const bodyHalf = 1.1
+          return Math.max(0.4, w.size * 0.5 - bodyHalf - 0.9)
+        }
+      } catch (error) { /* 拿不到就退回下面的视野算法 */ }
+    }
     // z 参数本身就是距离相机的米数，直接用，不用再换算。
     const dist = Number.isFinite(z) ? z : 8.5
     const view = Math.abs(dist) * 0.926
@@ -4798,19 +5028,17 @@ function main() {
   }
 
   // 角色头顶在屏幕上的像素坐标。给 DOM 用（梦境面板要浮在鱼头上）。
-  // 全部走已有的只读接口取值，不直接读 createPetPass 内部的 PET_POS / CAM_TO_PET
-  // （那两个是那个函数作用域里的 const，外面拿不到）。
-  // 与 petPass 绘制里「世界坐标 → 投影」用的是同一套矩阵和同一套换算：
-  //   世界 x = petParams.x（横向偏移）
-  //   世界 z = 8.5 - (dist - 8.5)，dist 由 __ossPetPos 给出
-  //   worldY = 地形高度 + 0.05 + lift
+  // 【这里的 wz 必须和 createPetPass 里绘制用的是【同一个函数】，不是同一套公式】
+  //   以前这里是第二份独立换算（PET_BASE_Z - (z - PET_BASE_DIST)），
+  //   一旦绘制那边换了映射而这里没换，就会「鱼画在 A 点、点击命中判定在 B 点」。
+  //   现在两边都调 moduleWorldZ()，物理上不可能再分叉。
+  const PET_BASE_Z = 8.5, PET_BASE_DIST = 8.5, PET_Y = 0.05
   window.__ossPetScreen = (lift) => {
     if (!lastCam) return null
     const pos = petParams ? { x: petParams.x, z: petParams.z } : null
     if (!pos) return null
-    const PET_BASE_Z = 8.5, PET_BASE_DIST = 8.5, PET_Y = 0.05
     const wx = pos.x
-    const wz = PET_BASE_Z - (pos.z - PET_BASE_DIST)
+    const wz = moduleWorldZ(Number.isFinite(pos.z) ? pos.z : PET_BASE_DIST)
     const wy = petTerrainHeight(wx, wz) + PET_Y + (Number.isFinite(lift) ? lift : 1.6)
     const m = lastCam.viewProj
     const cx = m[0] * wx + m[4] * wy + m[8] * wz + m[12]
